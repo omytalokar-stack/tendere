@@ -1,0 +1,6 @@
+{
+  "name": "AuraAlgo Crypto Paper Trading",
+  "description": "Automated Algorithmic Crypto Paper Trading Dashboard with multi-coin indicator voting, dynamic risk management, and live simulated execution.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,28 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "AuraAlgo Backend (MongoDB + Binance)",
+			"type": "shell",
+			"command": "npm",
+			"args": [
+				"--prefix",
+				"trading-bot-backend",
+				"start"
+			],
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "AuraAlgo Frontend (Vite)",
+			"type": "shell",
+			"command": "npm",
+			"args": [
+				"run",
+				"dev"
+			],
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}
