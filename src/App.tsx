@@ -1,15 +1,19 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
+  ArrowLeft,
   AlertTriangle,
   BarChart2,
   Bell,
   CheckCircle2,
   Clock,
+  Download,
   LockKeyhole,
   Radio,
   RefreshCw,
+  Settings,
   Shield,
+  Smartphone,
   Sparkles,
   Wallet,
   X,
@@ -47,6 +51,16 @@ const COINS = [
 
 type Tab = 'home' | 'strategy' | 'health' | 'wallet';
 
+interface BeforeInstallPromptEvent extends Event {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>;
+}
+
+function isStandaloneApp(): boolean {
+  return window.matchMedia('(display-mode: standalone)').matches
+    || (navigator as Navigator & { standalone?: boolean }).standalone === true;
+}
+
 const TABS: Array<{ id: Tab; label: string; icon: typeof Activity }> = [
   { id: 'home', label: 'Home', icon: Activity },
   { id: 'strategy', label: 'Strategy', icon: BarChart2 },
@@ -76,6 +90,10 @@ function pnlFor(trade: BackendTrade, markPrice: number, takerFeeRate: number) {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('home');
+  const [walletSettingsOpen, setWalletSettingsOpen] = useState(false);
+  const [canInstallApp, setCanInstallApp] = useState(false);
+  const [appInstalled, setAppInstalled] = useState(isStandaloneApp);
+  const [installMessage, setInstallMessage] = useState('');
   const [snapshot, setSnapshot] = useState<BackendSnapshot | null>(null);
   const [auditEvents, setAuditEvents] = useState<BackendAuditEvent[]>([]);
   const [backendError, setBackendError] = useState('');
@@ -94,6 +112,65 @@ export default function App() {
   const tradeStatuses = useRef(new Map<string, BackendTrade['status']>());
   const hasTradeBaseline = useRef(false);
   const notificationBaselineAt = useRef<number | null>(null);
+  const installPrompt = useRef<BeforeInstallPromptEvent | null>(null);
+
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return;
+
+    const onBeforeInstallPrompt = (event: Event) => {
+      event.preventDefault();
+      installPrompt.current = event as BeforeInstallPromptEvent;
+      setCanInstallApp(true);
+    };
+    const onAppInstalled = () => {
+      installPrompt.current = null;
+      setCanInstallApp(false);
+      setAppInstalled(true);
+      setInstallMessage('AuraAlgo has been installed on this device.');
+    };
+
+    window.addEventListener('beforeinstallprompt', onBeforeInstallPrompt);
+    window.addEventListener('appinstalled', onAppInstalled);
+    navigator.serviceWorker.register('/sw.js').catch((error: unknown) => {
+      console.error('AuraAlgo service worker registration failed', error);
+    });
+
+    return () => {
+      window.removeEventListener('beforeinstallprompt', onBeforeInstallPrompt);
+      window.removeEventListener('appinstalled', onAppInstalled);
+    };
+  }, []);
+
+  const handleInstallApp = async () => {
+    setInstallMessage('');
+    if (appInstalled) {
+      setInstallMessage('AuraAlgo is already installed on this device.');
+      return;
+    }
+
+    const prompt = installPrompt.current;
+    if (!prompt) {
+      const isAppleMobile = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+      setInstallMessage(isAppleMobile
+        ? 'In Safari, tap Share, then choose “Add to Home Screen”.'
+        : 'If the install prompt is unavailable, open your browser menu and choose “Install app” or “Add to Home screen”.');
+      return;
+    }
+
+    try {
+      await prompt.prompt();
+      const choice = await prompt.userChoice;
+      installPrompt.current = null;
+      setCanInstallApp(false);
+      setInstallMessage(choice.outcome === 'accepted'
+        ? 'AuraAlgo is installing. You can open it from your home screen.'
+        : 'Installation was cancelled. You can install AuraAlgo later from this page.');
+      if (choice.outcome === 'accepted') setAppInstalled(true);
+    } catch (error) {
+      console.error('AuraAlgo installation prompt failed', error);
+      setInstallMessage('The install prompt could not be opened. Use your browser menu to install the app.');
+    }
+  };
 
   useEffect(() => {
     let disposed = false;
@@ -384,12 +461,24 @@ export default function App() {
         )}
 
         {activeTab === 'wallet' && (
-          <WalletTab
-            snapshot={snapshot}
-            loading={loading}
-            closedTrades={closedTrades}
-            startingBalance={startingBalance}
-          />
+          walletSettingsOpen
+            ? <WalletSettings
+                appInstalled={appInstalled}
+                canInstall={canInstallApp}
+                installMessage={installMessage}
+                onBack={() => setWalletSettingsOpen(false)}
+                onInstall={() => void handleInstallApp()}
+              />
+            : <WalletTab
+                snapshot={snapshot}
+                loading={loading}
+                closedTrades={closedTrades}
+                startingBalance={startingBalance}
+                onOpenSettings={() => {
+                  setInstallMessage('');
+                  setWalletSettingsOpen(true);
+                }}
+              />
         )}
       </main>
 
@@ -913,14 +1002,34 @@ function WalletTab({
   loading,
   closedTrades,
   startingBalance,
+  onOpenSettings,
 }: {
   snapshot: BackendSnapshot | null;
   loading: boolean;
   closedTrades: BackendTrade[];
   startingBalance: number | null;
+  onOpenSettings: () => void;
 }) {
-  if (loading) return <div className="space-y-4"><SkeletonCard /><SkeletonCard /><SkeletonCard /></div>;
-  if (!snapshot || startingBalance === null) return <p className="rounded-2xl border border-pink-400/20 bg-pink-950/20 p-5 text-sm text-pink-100">Wallet data unavailable.</p>;
+  const heading = (
+    <section className="flex items-start justify-between gap-4">
+      <div>
+        <p className="text-[10px] font-mono uppercase tracking-[.2em] text-pink-300/70">Paper account</p>
+        <h2 className="mt-1 text-xl font-bold text-white">Wallet &amp; funds</h2>
+      </div>
+      <button
+        type="button"
+        onClick={onOpenSettings}
+        className="flex shrink-0 items-center gap-2 rounded-xl border border-purple-300/20 bg-purple-500/10 px-3 py-2 text-xs font-semibold text-purple-100 transition hover:border-pink-300/40 hover:bg-purple-500/20"
+      >
+        <Settings className="h-4 w-4" />
+        Settings
+      </button>
+    </section>
+  );
+  if (loading) return <div className="space-y-4">{heading}<SkeletonCard /><SkeletonCard /><SkeletonCard /></div>;
+  if (!snapshot || startingBalance === null) {
+    return <div className="space-y-4">{heading}<p className="rounded-2xl border border-pink-400/20 bg-pink-950/20 p-5 text-sm text-pink-100">Wallet data unavailable.</p></div>;
+  }
   const equity = [startingBalance];
   const recentPnl = closedTrades.reduce((total, trade) => total + trade.pnlUsd, 0);
   equity[0] = snapshot.wallet.balance - recentPnl;
@@ -936,10 +1045,7 @@ function WalletTab({
   const coinDecimals = (symbol: string) => COINS.find((coin) => coin.symbol === symbol)?.decimals ?? 2;
   return (
     <div className="space-y-5">
-      <section>
-        <p className="text-[10px] font-mono uppercase tracking-[.2em] text-pink-300/70">Paper account</p>
-        <h2 className="mt-1 text-xl font-bold text-white">Wallet &amp; funds</h2>
-      </section>
+      {heading}
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <WalletCard label="Starting margin" value={formatUsd(startingBalance)} note="Derived from wallet balance less realized P&L" />
         <WalletCard label="Current balance" value={formatUsd(snapshot.wallet.balance)} note={`Available ${formatUsd(snapshot.wallet.availableMargin)} · reserved ${formatUsd(snapshot.wallet.inTradeMargin)}`} />
@@ -1033,6 +1139,81 @@ function HealthCard({ icon, label, value, ok }: { icon: React.ReactNode; label: 
         <span className={`h-1.5 w-1.5 rounded-full ${ok ? 'bg-emerald-400' : 'bg-pink-400'}`} />
       </div>
       <p className="mt-3 text-sm font-semibold text-slate-100">{value}</p>
+    </div>
+  );
+}
+
+function WalletSettings({
+  appInstalled,
+  canInstall,
+  installMessage,
+  onBack,
+  onInstall,
+}: {
+  appInstalled: boolean;
+  canInstall: boolean;
+  installMessage: string;
+  onBack: () => void;
+  onInstall: () => void;
+}) {
+  return (
+    <div className="space-y-5">
+      <section>
+        <button
+          type="button"
+          onClick={onBack}
+          className="mb-4 inline-flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-slate-300 transition hover:bg-white/5 hover:text-white"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Back to wallet
+        </button>
+        <p className="text-[10px] font-mono uppercase tracking-[.2em] text-pink-300/70">Preferences</p>
+        <h2 className="mt-1 text-xl font-bold text-white">App settings</h2>
+      </section>
+
+      <section className="rounded-3xl border border-purple-400/15 bg-white/[0.025] p-5 sm:p-6">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-purple-300/20 bg-purple-500/10">
+              <Smartphone className="h-5 w-5 text-pink-200" />
+            </div>
+            <div className="min-w-0">
+              <h3 className="text-sm font-semibold text-white">Install AuraAlgo</h3>
+              <p className="mt-1 text-[11px] leading-relaxed text-slate-400">
+                Add to your home screen.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onInstall}
+            disabled={appInstalled}
+            className="flex shrink-0 items-center justify-center gap-2 rounded-xl border border-pink-300/30 bg-pink-500/15 px-3 py-2.5 text-xs font-semibold text-pink-100 transition hover:bg-pink-500/25 disabled:cursor-default disabled:border-emerald-300/20 disabled:bg-emerald-500/10 disabled:text-emerald-100"
+          >
+            {appInstalled ? <CheckCircle2 className="h-4 w-4" /> : <Download className="h-4 w-4" />}
+            {appInstalled ? 'Installed' : canInstall ? 'Install app' : 'Install'}
+          </button>
+        </div>
+
+        {installMessage && (
+          <p role="status" className="mt-3 rounded-xl border border-purple-300/15 bg-purple-950/30 p-3 text-xs leading-relaxed text-purple-100">
+            {installMessage}
+          </p>
+        )}
+
+        {!appInstalled && !canInstall && !installMessage && (
+          <p className="mt-3 text-[11px] leading-relaxed text-slate-500">
+            On iPhone/iPad, use Safari’s Share button and choose “Add to Home Screen”. On Android, use the browser menu and choose “Install app” or “Add to Home screen”.
+          </p>
+        )}
+      </section>
+
+      <section className="rounded-3xl border border-purple-400/15 bg-white/[0.025] p-5">
+        <h3 className="text-sm font-semibold text-white">Using AuraAlgo offline</h3>
+        <p className="mt-2 text-xs leading-relaxed text-slate-400">
+          The app shell can reopen when cached, but live Binance prices, account data, and paper-trade updates require an internet connection. Offline requests are never replaced with demo data.
+        </p>
+      </section>
     </div>
   );
 }

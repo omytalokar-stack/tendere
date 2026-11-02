@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#211333"/>
+      <stop offset="1" stop-color="#0d0b14"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#c084fc"/>
+      <stop offset="1" stop-color="#f472b6"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <circle cx="256" cy="256" r="190" fill="none" stroke="url(#ring)" stroke-width="12" opacity=".8"/>
+  <path d="M142 205 151 126l79 48a154 154 0 0 1 52 0l79-48 9 79a143 143 0 0 1 22 76c0 91-59 151-136 151s-136-60-136-151a143 143 0 0 1 22-76Z" fill="#08070c" stroke="#a78bfa" stroke-width="10" stroke-linejoin="round"/>
+  <path d="M191 258c18-23 42-23 60 0-19 18-42 18-60 0Zm70 0c18-23 42-23 60 0-19 18-42 18-60 0Z" fill="#f472b6"/>
+  <path d="m248 294 8 8 8-8" fill="none" stroke="#c084fc" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="m184 300-49-9m51 24-48 6m190-21 49-9m-51 24 48 6" fill="none" stroke="#a78bfa" stroke-width="6" stroke-linecap="round"/>
+</svg>

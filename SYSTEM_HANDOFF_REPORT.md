@@ -46,6 +46,7 @@ Render (Node.js/Express)
 ### Frontend
 
 - React + TypeScript + Vite; main screen and tabs are in `src/App.tsx`.
+- Installable PWA with a standalone manifest, app icons and a service worker that caches the app shell/static assets; API requests always go to the network. The Wallet tab links to Settings with install controls/instructions.
 - `src/services/backendApi.ts` fetches backend snapshots and validates feed shape: all configured symbols, 500 candles, and 20 levels on each side of the book.
 - The dashboard refreshes its backend snapshot and audit events approximately every 3 seconds.
 - Tabs: Home, Strategy, Brain Health, Wallet.
