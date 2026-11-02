@@ -1,4 +1,8 @@
-const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/+$/, '');
+const rawUrl = import.meta.env.VITE_API_BASE_URL || '/api';
+const normalizedUrl = rawUrl.replace(/\/+$/, '');
+const API_BASE_URL = normalizedUrl.endsWith('/api')
+  ? normalizedUrl
+  : `${normalizedUrl}/api`;
 
 export interface BackendStatus {
   running: boolean;
@@ -129,7 +133,7 @@ export interface BackendSnapshot {
 }
 
 async function request<T>(path: string, signal?: AbortSignal, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${apiBaseUrl}${path}`, {
+  const response = await fetch(`${API_BASE_URL}/${path.replace(/^\/+/, '')}`, {
     headers: { Accept: 'application/json', ...init?.headers },
     ...init,
     signal,
