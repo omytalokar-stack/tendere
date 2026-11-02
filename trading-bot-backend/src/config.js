@@ -31,7 +31,7 @@ const config = {
   leverage: numberFromEnv('PAPER_LEVERAGE', 1, { min: 1, max: 5 }),
   rewardRiskRatio: numberFromEnv('REWARD_RISK_RATIO', 2, { min: 1, max: 10 }),
   dailyLossLimit: numberFromEnv('DAILY_LOSS_LIMIT_USDT', 400, { min: 1 }),
-  binanceRestUrl: process.env.BINANCE_REST_URL || 'https://api.binance.com',
+  binanceRestUrl: process.env.BINANCE_REST_URL || 'https://data-api.binance.vision',
   binanceWsUrl: process.env.BINANCE_WS_URL || 'wss://stream.binance.com:9443/stream',
 };
 

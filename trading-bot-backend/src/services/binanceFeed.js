@@ -5,6 +5,11 @@ const { config, SYMBOLS } = require('../config');
 const REQUIRED_CANDLES = 500;
 const REQUIRED_BOOK_LEVELS = 50;
 const BOOK_REFRESH_MS = 5_000;
+const REST_REQUEST_INTERVAL_MS = 150;
+const DEFAULT_BAN_COOLDOWN_MS = 5 * 60_000;
+let restRequestQueue = Promise.resolve();
+let lastRestRequestAt = 0;
+let restBlockedUntil = 0;
 const INTERVAL_MS = {
   '1m': 60_000, '3m': 180_000, '5m': 300_000, '15m': 900_000,
   '30m': 1_800_000, '1h': 3_600_000, '2h': 7_200_000, '4h': 14_400_000,
@@ -15,6 +20,49 @@ function dataError(symbol, detail) {
   const error = new Error(`DATA_FEED_OFFLINE: Binance real feed failed for ${symbol}: ${detail}`);
   error.code = 'DATA_FEED_OFFLINE';
   return error;
+}
+
+function retryAfterMs(cause) {
+  const retryAfter = cause.response?.headers?.['retry-after'];
+  if (retryAfter !== undefined) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1_000;
+    const retryAt = Date.parse(retryAfter);
+    if (Number.isFinite(retryAt)) return Math.max(0, retryAt - Date.now());
+  }
+  return cause.response?.status === 418 ? DEFAULT_BAN_COOLDOWN_MS : 0;
+}
+
+function requestRest(url, options) {
+  const request = restRequestQueue.then(async () => {
+    if (Date.now() < restBlockedUntil) {
+      const error = new Error('Binance REST requests are paused after a rate-limit response');
+      error.response = { status: 418 };
+      error.retryAfterMs = restBlockedUntil - Date.now();
+      throw error;
+    }
+    const elapsed = Date.now() - lastRestRequestAt;
+    if (lastRestRequestAt && elapsed < REST_REQUEST_INTERVAL_MS) {
+      await new Promise((resolve) => setTimeout(resolve, REST_REQUEST_INTERVAL_MS - elapsed));
+    }
+    lastRestRequestAt = Date.now();
+    try {
+      return await axios.get(url, options);
+    } catch (error) {
+      if (error.response?.status === 418) {
+        const cooldown = error.retryAfterMs || retryAfterMs(error);
+        restBlockedUntil = Math.max(restBlockedUntil, Date.now() + cooldown);
+        error.retryAfterMs = cooldown;
+      }
+      throw error;
+    }
+  });
+  restRequestQueue = request.then(() => undefined, () => undefined);
+  return request;
+}
+
+function binanceRestUrl(path) {
+  return `${config.binanceRestUrl.replace(/\/+$/, '')}${path}`;
 }
 
 class BinanceFeed {
@@ -45,12 +93,16 @@ class BinanceFeed {
   async fetchCandles(symbol) {
     let response;
     try {
-      response = await axios.get(`${config.binanceRestUrl}/api/v3/klines`, {
+      response = await requestRest(binanceRestUrl('/api/v3/klines'), {
         params: { symbol, interval: config.candleInterval, limit: 501 },
         timeout: 10_000,
       });
     } catch (cause) {
-      throw dataError(symbol, cause.message);
+      const detail = cause.response?.data?.msg || cause.message;
+      const error = dataError(symbol, `HTTP ${cause.response?.status || 'request'}: ${detail}`);
+      error.status = cause.response?.status;
+      error.retryAfterMs = cause.retryAfterMs || retryAfterMs(cause);
+      throw error;
     }
 
     if (!Array.isArray(response.data)) throw dataError(symbol, 'invalid kline response');
@@ -96,13 +148,16 @@ class BinanceFeed {
   async fetchOrderBook(symbol) {
     let response;
     try {
-      response = await axios.get(`${config.binanceRestUrl}/api/v3/depth`, {
+      response = await requestRest(binanceRestUrl('/api/v3/depth'), {
         params: { symbol, limit: 100 },
         timeout: 10_000,
       });
     } catch (cause) {
-      const error = new Error(`ORDERBOOK_DISCONNECTED: Binance depth request failed for ${symbol}: ${cause.message}`);
+      const detail = cause.response?.data?.msg || cause.message;
+      const error = new Error(`ORDERBOOK_DISCONNECTED: Binance depth request failed for ${symbol}: HTTP ${cause.response?.status || 'request'}: ${detail}`);
       error.code = 'ORDERBOOK_DISCONNECTED';
+      error.status = cause.response?.status;
+      error.retryAfterMs = cause.retryAfterMs || retryAfterMs(cause);
       throw error;
     }
 
@@ -190,7 +245,7 @@ class BinanceFeed {
       this.startBookRefresh();
     } catch (error) {
       this.logger.error('Binance real market data synchronization failed', error);
-      this.scheduleReconnect();
+      this.scheduleReconnect(error);
     } finally {
       this.syncing = false;
     }
@@ -214,6 +269,7 @@ class BinanceFeed {
   startBookRefresh() {
     if (this.bookTimer) clearInterval(this.bookTimer);
     this.bookTimer = setInterval(() => {
+      if (Date.now() < restBlockedUntil) return;
       Promise.all(SYMBOLS.map(async (symbol) => {
         try {
           const orderBook = await this.fetchOrderBook(symbol);
@@ -324,9 +380,9 @@ class BinanceFeed {
     });
   }
 
-  scheduleReconnect() {
+  scheduleReconnect(error) {
     if (this.stopped || this.reconnectTimer) return;
-    const delay = this.reconnectDelay;
+    const delay = Math.max(this.reconnectDelay, error?.retryAfterMs || 0);
     this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30_000);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
@@ -354,3 +410,4 @@ class BinanceFeed {
 
 module.exports = BinanceFeed;
 module.exports.REQUIRED_CANDLES = REQUIRED_CANDLES;
+module.exports.REST_REQUEST_INTERVAL_MS = REST_REQUEST_INTERVAL_MS;
