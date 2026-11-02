@@ -74,12 +74,12 @@ Render (Node.js/Express)
 ## 4. Binance market data and real-data checks
 
 - Configured symbols: ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT, ADAUSDT, AVAXUSDT.
-- Default candle interval: 15 minutes.
+- Entry analysis uses verified 5-minute and 15-minute Binance candles. The 15-minute setup can enter independently; a 5-minute setup is eligible only when the 15-minute signal for the same symbol confirms the same direction.
 - REST host default: `https://data-api.binance.vision`; trading API hosts are rejected by config.
 - WebSocket default: `wss://data-stream.binance.vision/stream`.
-- Startup downloads 500 unique, contiguous, completed candles for each symbol, sequentially with a delay between symbols.
+- Startup downloads 500 unique, contiguous, completed candles for each symbol and entry interval, sequentially with a delay between requests.
 - A `418`/IP ban pauses REST bootstrap requests until the supplied expiry/`Retry-After` duration passes; the backend keeps the WebSocket running and retries missing histories with backoff. It reports unavailable markets and blocks paper entries until verified history is available.
-- The combined socket receives finalized/in-progress klines, trade events, and Binance partial-depth snapshots.
+- The combined socket receives finalized/in-progress 5-minute and 15-minute klines, trade events, and Binance partial-depth snapshots.
 - Binance's `depth20` payload does not use the same event shape as a diff-depth `depthUpdate`. The parser uses the combined-stream name and the `bids`/`asks` arrays. Regression test: `combined WebSocket partial-depth messages update the order book`.
 - Market data is not generated with random/demo prices. The frontend clears its snapshot and displays the error if required data is invalid/unavailable.
 - Prices normally use the latest Binance trade. If the trade tick is quiet but the top-of-book is still fresh, backend can provide the midpoint of the real best bid/ask and labels its source as `ORDER_BOOK_MID`.
@@ -113,6 +113,7 @@ A new entry is considered only when:
 
 - The bot's persisted enabled flag is true.
 - All six markets are ready and their completed candle closes align.
+- For a 5-minute entry, the same symbol also has a qualifying 15-minute signal in the same direction; 15-minute entries continue to use their own qualifying signal.
 - There is no open position anywhere in the account.
 - The daily realized-loss limit has not been reached.
 - The symbol is not in its post-loss cooldown.

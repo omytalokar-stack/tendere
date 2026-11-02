@@ -10,6 +10,7 @@ export interface BackendStatus {
   feedConnected: boolean;
   marketDataReady: boolean;
   interval: string;
+  entryIntervals?: string[];
   symbols: string[];
   prices: Record<string, number>;
   riskPercent: number;

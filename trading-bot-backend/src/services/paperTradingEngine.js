@@ -7,6 +7,7 @@ const BinanceFeed = require('./binanceFeed');
 const {
   analyzeCandles,
   getEntrySignal,
+  getConfirmedEntrySignal,
   RISK_PERCENT,
   sizePosition,
   MIN_CANDLES,
@@ -38,8 +39,22 @@ class PaperTradingEngine {
     this.enabled = false;
     this.prices = new Map();
     this.candles = new Map(SYMBOLS.map((symbol) => [symbol, []]));
+    this.candleHistories = new Map(config.entryIntervals.map((interval) => [
+      interval,
+      interval === config.candleInterval
+        ? this.candles
+        : new Map(SYMBOLS.map((symbol) => [symbol, []])),
+    ]));
+    this.candleErrors = new Map(config.entryIntervals.map((interval) => [
+      interval,
+      new Map(SYMBOLS.map((symbol) => [
+        symbol,
+        `DATA_FEED_OFFLINE: Binance real feed failed for ${symbol}: awaiting initial synchronization`,
+      ])),
+    ]));
     this.lastProcessedCandle = new Map();
-    this.lastEntryScanCandleOpenTime = 0;
+    this.lastProcessedByInterval = new Map();
+    this.lastEntryScanCandleOpenTime = new Map(config.entryIntervals.map((interval) => [interval, 0]));
     this.orderBooks = new Map();
     this.pendingExits = new Map();
     this.closingTrades = new Set();
@@ -60,12 +75,12 @@ class PaperTradingEngine {
           this.logger.error('Live tick processing failed', { symbol, error }));
       },
       onOrderBook: (symbol, orderBook) => this.orderBooks.set(symbol, orderBook),
-      onFeedState: (symbol, update) => this.updateFeedState(symbol, update),
+      onFeedState: (symbol, update, interval) => this.updateFeedState(symbol, update, interval),
       logger,
     });
   }
 
-  updateFeedState(symbol, update) {
+  updateFeedState(symbol, update, interval = config.candleInterval) {
     const previous = this.feedStates.get(symbol) || {};
     if (update.error && update.error !== previous.error) {
       this.recordAudit('FEED', symbol, update.error);
@@ -73,7 +88,15 @@ class PaperTradingEngine {
     if (update.orderBookError && update.orderBookError !== previous.orderBookError) {
       this.recordAudit('FEED', symbol, update.orderBookError);
     }
-    this.feedStates.set(symbol, { ...previous, ...update, updatedAt: new Date() });
+    if (update.error !== undefined) {
+      this.candleErrors.get(interval)?.set(symbol, update.error);
+    }
+    this.feedStates.set(symbol, {
+      ...previous,
+      ...update,
+      ...(update.orderBookError === undefined ? { orderBookError: previous.orderBookError } : {}),
+      updatedAt: new Date(),
+    });
   }
 
   recordAudit(type, symbol, message) {
@@ -127,6 +150,7 @@ class PaperTradingEngine {
     this.logger.info('Paper trading engine started', {
       symbols: SYMBOLS,
       interval: config.candleInterval,
+      entryIntervals: config.entryIntervals,
       riskPercent: RISK_PERCENT,
       rewardRiskRatio: config.rewardRiskRatio,
       leverage: config.leverage,
@@ -147,8 +171,13 @@ class PaperTradingEngine {
     this.logger.info('Paper trading engine stopped');
   }
 
-  async handleCandles(symbol, incomingCandles, { historical, final = true, triggerOnly = false }) {
-    const history = this.candles.get(symbol);
+  async handleCandles(symbol, incomingCandles, {
+    historical,
+    final = true,
+    triggerOnly = false,
+    interval = config.candleInterval,
+  }) {
+    const history = this.candleHistories.get(interval)?.get(symbol);
     if (!history) return;
 
     for (const candle of incomingCandles) {
@@ -159,12 +188,14 @@ class PaperTradingEngine {
         else history.push(candle);
         history.sort((a, b) => a.openTime - b.openTime);
         if (history.length > REQUIRED_CANDLES) history.splice(0, history.length - REQUIRED_CANDLES);
-        this.lastProcessedCandle.set(symbol, Math.max(this.lastProcessedCandle.get(symbol) || 0, candle.openTime));
+        if (interval === config.candleInterval) {
+          this.lastProcessedCandle.set(symbol, Math.max(this.lastProcessedCandle.get(symbol) || 0, candle.openTime));
+        }
         continue;
       }
 
       const openTrade = await PaperTrade.findOne({ symbol, status: 'OPEN' });
-      if (openTrade && candle.isFinal !== true) {
+      if (interval === config.candleInterval && openTrade && candle.isFinal !== true) {
         const exit = this.getExit(openTrade, candle);
         if (exit) {
           this.pendingExits.set(symbol, exit.reason);
@@ -174,7 +205,8 @@ class PaperTradingEngine {
         continue;
       }
       if (!final && !triggerOnly) continue;
-      const priorTimestamp = this.lastProcessedCandle.get(symbol) || 0;
+      const intervalKey = `${interval}:${symbol}`;
+      const priorTimestamp = this.lastProcessedByInterval.get(intervalKey) || 0;
       const existingIndex = history.findIndex((item) => item.openTime === candle.openTime);
       if (candle.isFinal === true) {
         if (existingIndex >= 0) history[existingIndex] = candle;
@@ -187,11 +219,14 @@ class PaperTradingEngine {
       if (candle.openTime <= priorTimestamp) continue;
 
       if (!this.running) continue;
-      await this.processClosedCandle(symbol, candle, history);
-      this.lastProcessedCandle.set(symbol, candle.openTime);
+      await this.processClosedCandle(symbol, candle, history, interval);
+      this.lastProcessedByInterval.set(intervalKey, candle.openTime);
+      if (interval === config.candleInterval) {
+        this.lastProcessedCandle.set(symbol, candle.openTime);
+      }
     }
 
-    if (historical) {
+    if (historical && interval === config.candleInterval) {
       const openTrade = await PaperTrade.findOne({ symbol, status: 'OPEN' });
       const historicalExit = openTrade && history
         .filter((candle) => new Date(candle.time).getTime() > new Date(openTrade.openedAt).getTime())
@@ -215,27 +250,31 @@ class PaperTradingEngine {
     if (closed) this.pendingExits.delete(symbol);
   }
 
-  async processClosedCandle(symbol, candle, history) {
+  async processClosedCandle(symbol, candle, history, interval = config.candleInterval) {
     const openTrade = await PaperTrade.findOne({ symbol, status: 'OPEN' });
     if (openTrade) {
-      const exit = this.getExit(openTrade, candle)
-        || await this.getMomentumReversal(openTrade, history);
-      if (exit) {
-        this.pendingExits.set(symbol, exit.reason);
-        const closed = await this.closeAtMarket(openTrade, exit.reason);
-        if (closed) this.pendingExits.delete(symbol);
+      if (interval === config.candleInterval) {
+        const exit = this.getExit(openTrade, candle)
+          || await this.getMomentumReversal(openTrade, history);
+        if (exit) {
+          this.pendingExits.set(symbol, exit.reason);
+          const closed = await this.closeAtMarket(openTrade, exit.reason);
+          if (closed) this.pendingExits.delete(symbol);
+        }
       }
       return;
     }
 
     if (!this.enabled) return;
     if (!this.allMarketDataReady()) return;
-    await this.scanMarketsForEntry(candle.openTime);
+    await this.scanMarketsForEntry(candle.openTime, interval);
   }
 
-  async scanMarketsForEntry(candleOpenTime) {
-    if (candleOpenTime <= this.lastEntryScanCandleOpenTime) return;
-    const histories = new Map(SYMBOLS.map((symbol) => [symbol, this.candles.get(symbol) || []]));
+  async scanMarketsForEntry(candleOpenTime, interval = config.candleInterval) {
+    const lastScanTime = this.lastEntryScanCandleOpenTime.get(interval) || 0;
+    if (candleOpenTime <= lastScanTime) return;
+    const intervalCandles = this.candleHistories.get(interval);
+    const histories = new Map(SYMBOLS.map((symbol) => [symbol, intervalCandles?.get(symbol) || []]));
     if (!SYMBOLS.every((symbol) => {
       const history = histories.get(symbol);
       return history.length === REQUIRED_CANDLES
@@ -243,7 +282,15 @@ class PaperTradingEngine {
         && this.isCandleHistoryComplete(history);
     })) return;
 
-    this.lastEntryScanCandleOpenTime = candleOpenTime;
+    this.lastEntryScanCandleOpenTime.set(interval, candleOpenTime);
+    const confirmationHistories = interval === '5m'
+      ? new Map(SYMBOLS.map((symbol) => [
+        symbol,
+        this.candleHistories.get('15m')?.get(symbol) || [],
+      ]))
+      : null;
+    if (confirmationHistories && !SYMBOLS.every((symbol) =>
+      this.isCandleHistoryComplete(confirmationHistories.get(symbol)))) return;
     if (await PaperTrade.exists({ status: 'OPEN' })) return;
     if (await this.dailyLossLimitReached()) {
       this.logger.warn('Daily loss limit reached; new paper positions are paused');
@@ -261,7 +308,12 @@ class PaperTradingEngine {
       if (!this.isOrderBookFresh(executionBook)) return;
 
       const analysis = analyzeCandles(history, executionBook);
-      const direction = getEntrySignal(analysis);
+      const confirmationAnalysis = confirmationHistories
+        ? analyzeCandles(confirmationHistories.get(symbol), executionBook)
+        : null;
+      const direction = confirmationAnalysis
+        ? getConfirmedEntrySignal(analysis, confirmationAnalysis)
+        : getEntrySignal(analysis);
       if (!direction) continue;
 
       const stopDistance = analysis.atr * 1.5;
@@ -301,7 +353,7 @@ class PaperTradingEngine {
         leverage: config.leverage,
         stopLoss,
         takeProfit,
-        strategy: `${analysis.strategy} (${direction === 'LONG' ? analysis.buyVotes : analysis.sellVotes}/${analysis.totalVotes})`,
+        strategy: `${interval}${confirmationAnalysis ? ' + 15m confirmed' : ''}: ${analysis.strategy} (${direction === 'LONG' ? analysis.buyVotes : analysis.sellVotes}/${analysis.totalVotes})`,
         openedAt: new Date(),
       });
       if (trade) {
@@ -364,16 +416,20 @@ class PaperTradingEngine {
   allMarketDataReady() {
     if (!this.feed.connected) return false;
     return SYMBOLS.every((symbol) => {
-      const candles = this.candles.get(symbol) || [];
       const state = this.feedStates.get(symbol);
       const orderBook = this.orderBooks.get(symbol);
-      if (candles.length === REQUIRED_CANDLES && !this.isCandleHistoryComplete(candles)) {
-        this.updateFeedState(symbol, {
-          error: `DATA_FEED_OFFLINE: Binance real feed failed for ${symbol}: completed candle history contains a time gap`,
-        });
-      }
-      return this.isCandleHistoryComplete(candles)
-        && !state?.error
+      const candleDataReady = config.entryIntervals.every((interval) => {
+        const candles = this.candleHistories.get(interval)?.get(symbol) || [];
+        if (candles.length === REQUIRED_CANDLES && !this.isCandleHistoryComplete(candles)) {
+          this.candleErrors.get(interval).set(
+            symbol,
+            `DATA_FEED_OFFLINE: Binance real feed failed for ${symbol}: ${interval} completed candle history contains a time gap`,
+          );
+        }
+        return this.isCandleHistoryComplete(candles)
+          && !this.candleErrors.get(interval)?.get(symbol);
+      });
+      return candleDataReady
         && !state?.orderBookError
         && this.isOrderBookFresh(orderBook);
     });
@@ -639,6 +695,7 @@ class PaperTradingEngine {
       enabled: this.enabled && Boolean(state?.enabled),
       feedConnected: this.feed.connected,
       interval: config.candleInterval,
+      entryIntervals: config.entryIntervals,
       symbols: SYMBOLS,
       prices: Object.fromEntries(this.prices),
       riskPercent: RISK_PERCENT,
@@ -648,7 +705,13 @@ class PaperTradingEngine {
       dailyLossLimit: config.dailyLossLimit,
       lastProcessed: Object.fromEntries(this.lastProcessedCandle),
       marketDataReady: this.allMarketDataReady(),
-      marketErrors: Object.fromEntries(SYMBOLS.map((symbol) => [symbol, this.feedStates.get(symbol)])),
+      marketErrors: Object.fromEntries(SYMBOLS.map((symbol) => [symbol, {
+        ...this.feedStates.get(symbol),
+        intervalErrors: Object.fromEntries(config.entryIntervals.map((interval) => [
+          interval,
+          this.candleErrors.get(interval)?.get(symbol) || null,
+        ])),
+      }])),
     };
   }
 
@@ -662,7 +725,7 @@ class PaperTradingEngine {
       error.status = 400;
       throw error;
     }
-    const candles = this.candles.get(symbol) || [];
+    const candles = this.candleHistories.get(config.candleInterval)?.get(symbol) || [];
     const orderBook = this.orderBooks.get(symbol);
     const state = this.feedStates.get(symbol);
     const lastTradeAt = state?.lastTradeAt;
@@ -674,7 +737,11 @@ class PaperTradingEngine {
       : orderBookFresh ? 'ORDER_BOOK_MID' : null;
     const quoteUpdatedAt = priceSource === 'TRADE' ? lastTradeAt : orderBook?.updatedAt;
     const marketAge = quoteUpdatedAt ? Date.now() - new Date(quoteUpdatedAt).getTime() : Infinity;
-    const candleError = state?.error
+    const intervalError = config.entryIntervals
+      .map((interval) => this.candleErrors.get(interval)?.get(symbol))
+      .find(Boolean);
+    const candleError = intervalError
+      || state?.error
       || (candles.length !== REQUIRED_CANDLES
         ? `DATA_FEED_OFFLINE: Binance real feed failed for ${symbol}: expected ${REQUIRED_CANDLES} completed candles, received ${candles.length}`
         : !this.isCandleHistoryComplete(candles)

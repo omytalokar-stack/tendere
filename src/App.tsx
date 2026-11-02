@@ -919,6 +919,9 @@ function HealthTab({
       <section>
         <p className="text-[10px] font-mono uppercase tracking-[.2em] text-pink-300/70">Engine diagnostics</p>
         <h2 className="mt-1 text-xl font-bold text-white">Brain health &amp; risk shield</h2>
+        <p className="mt-1 text-xs text-slate-400">
+          Entry scans: {snapshot?.status.entryIntervals?.join(' + ') ?? 'Not reported'}; 5m entries require matching 15m confirmation.
+        </p>
       </section>
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <HealthCard icon={<Radio />} label="Binance WebSocket" value={snapshot?.status.feedConnected ? 'Connected' : 'Disconnected'} ok={Boolean(snapshot?.status.feedConnected)} />

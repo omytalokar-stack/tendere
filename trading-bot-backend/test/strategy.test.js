@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const {
   analyzeCandles,
   getEntrySignal,
+  getConfirmedEntrySignal,
   sizePosition,
   MIN_CANDLES,
   RISK_PERCENT,
@@ -83,4 +84,23 @@ test('entry requires seven aligned votes, volume above 1.5x, and 60% aligned boo
     volumeRatio: 1.6,
     orderBookPressure: { bidPercent: 39, askPercent: 61 },
   }), 'SHORT');
+});
+
+test('five-minute entries require the fifteen-minute signal to confirm the same direction', () => {
+  const long = {
+    buyVotes: 7,
+    sellVotes: 2,
+    volumeRatio: 1.51,
+    orderBookPressure: { bidPercent: 60, askPercent: 40 },
+  };
+  const short = {
+    buyVotes: 2,
+    sellVotes: 7,
+    volumeRatio: 1.51,
+    orderBookPressure: { bidPercent: 40, askPercent: 60 },
+  };
+  assert.equal(getConfirmedEntrySignal(long, long), 'LONG');
+  assert.equal(getConfirmedEntrySignal(long, short), null);
+  assert.equal(getConfirmedEntrySignal(long, { ...long, volumeRatio: 1.5 }), null);
+  assert.equal(getConfirmedEntrySignal({ ...short, volumeRatio: 1.5 }, short), null);
 });

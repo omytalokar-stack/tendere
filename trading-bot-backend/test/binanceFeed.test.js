@@ -56,20 +56,21 @@ test('historical candles use the configured REST host and validate real closed h
   const requested = [];
   config.binanceRestUrl = 'https://market-data.example/';
   config.candleInterval = '15m';
-  const intervalMs = 900_000;
-  const startTime = Date.now() - 502 * intervalMs;
-  const candles = Array.from({ length: 501 }, (_, index) => {
-    const openTime = startTime + index * intervalMs;
-    return [openTime, '100', '101', '99', '100', '2', openTime + intervalMs - 1];
-  });
   axios.get = async (url, options) => {
     requested.push({ url, options });
-    return { data: candles };
+    const intervalMs = options.params.interval === '5m' ? 300_000 : 900_000;
+    const startTime = Date.now() - 502 * intervalMs;
+    return {
+      data: Array.from({ length: 501 }, (_, index) => {
+        const openTime = startTime + index * intervalMs;
+        return [openTime, '100', '101', '99', '100', '2', openTime + intervalMs - 1];
+      }),
+    };
   };
 
   try {
     const feed = createFeed();
-    const history = await feed.fetchCandles(SYMBOLS[0]);
+    const history = await feed.fetchCandles(SYMBOLS[0], '15m');
     assert.equal(history.length, 500);
     assert.equal(requested[0].url, 'https://market-data.example/api/v3/klines');
     assert.deepEqual(requested[0].options.params, {
@@ -77,6 +78,9 @@ test('historical candles use the configured REST host and validate real closed h
       interval: '15m',
       limit: 501,
     });
+    const fiveMinuteHistory = await feed.fetchCandles(SYMBOLS[0], '5m');
+    assert.equal(fiveMinuteHistory.length, 500);
+    assert.equal(requested[1].options.params.interval, '5m');
   } finally {
     axios.get = originalGet;
     config.binanceRestUrl = originalUrl;
@@ -112,14 +116,16 @@ test('historical bootstrap parses Binance IP-ban expiry when Retry-After is abse
   }
 });
 
-test('combined WebSocket URL subscribes all six symbols to kline, trade, and depth streams', () => {
+test('combined WebSocket URL subscribes both candle intervals, trade, and depth for all symbols', () => {
   const feed = createFeed();
   const url = new URL(feed.getStreamUrl());
   const streams = url.searchParams.get('streams').split('/');
-  assert.equal(streams.length, SYMBOLS.length * 3);
+  assert.equal(streams.length, SYMBOLS.length * (config.entryIntervals.length + 2));
   for (const symbol of SYMBOLS) {
     const normalized = symbol.toLowerCase();
-    assert.ok(streams.includes(`${normalized}@kline_${config.candleInterval}`));
+    for (const interval of config.entryIntervals) {
+      assert.ok(streams.includes(`${normalized}@kline_${interval}`));
+    }
     assert.ok(streams.includes(`${normalized}@trade`));
     assert.ok(streams.includes(`${normalized}@depth20@1000ms`));
   }
@@ -168,6 +174,24 @@ test('WebSocket trade, depth, and closed-kline events update live feed state', a
       },
     },
   })));
+  feed.handleMessage(Buffer.from(JSON.stringify({
+    stream: `${symbol.toLowerCase()}@kline_5m`,
+    data: {
+      e: 'kline',
+      s: symbol,
+      k: {
+        i: '5m',
+        t: timestamp - 300_000,
+        T: timestamp - 1,
+        o: '123',
+        h: '124',
+        l: '122',
+        c: '123.45',
+        v: '20',
+        x: true,
+      },
+    },
+  })));
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.deepEqual(prices, [{ symbol, price: 123.45 }]);
@@ -176,9 +200,12 @@ test('WebSocket trade, depth, and closed-kline events update live feed state', a
   assert.equal(books[0].orderBook.levelCount, 20);
   assert.equal(books[0].orderBook.bestBid, 123.4);
   assert.equal(books[0].orderBook.bestAsk, 123.5);
-  assert.equal(candles.length, 1);
+  assert.equal(candles.length, 2);
   assert.equal(candles[0].options.final, true);
+  assert.equal(candles[0].options.interval, config.candleInterval);
+  assert.equal(candles[1].options.interval, '5m');
   assert.equal(feed.data.get(symbol).candles.length, 1);
+  assert.equal(feed.intervalData.get('5m').get(symbol).candles.length, 1);
 });
 
 test('combined WebSocket partial-depth messages update the order book', () => {
@@ -212,26 +239,29 @@ test('418 pauses REST bootstrap until the ban expires, then restores history whi
   const originalFetchCandles = BinanceFeed.prototype.fetchCandles;
   let requests = 0;
   const loggedMessages = [];
-  const intervalMs = {
+  const intervalDurations = {
     '1m': 60_000, '3m': 180_000, '5m': 300_000, '15m': 900_000,
     '30m': 1_800_000, '1h': 3_600_000, '2h': 7_200_000, '4h': 14_400_000,
     '6h': 21_600_000, '8h': 28_800_000, '12h': 43_200_000, '1d': 86_400_000,
-  }[config.candleInterval];
-  const latestOpenTime = Math.floor(Date.now() / intervalMs) * intervalMs - intervalMs;
-  const history = Array.from({ length: BinanceFeed.REQUIRED_CANDLES }, (_, index) => {
-    const openTime = latestOpenTime - (BinanceFeed.REQUIRED_CANDLES - index - 1) * intervalMs;
-    return {
-      time: new Date(openTime),
-      openTime,
-      closeTime: openTime + intervalMs - 1,
-      open: 100,
-      high: 101,
-      low: 99,
-      close: 100,
-      volume: 2,
-      isFinal: true,
-    };
-  });
+  };
+  const histories = new Map(config.entryIntervals.map((interval) => {
+    const intervalMs = intervalDurations[interval];
+    const latestOpenTime = Math.floor(Date.now() / intervalMs) * intervalMs - intervalMs;
+    return [interval, Array.from({ length: BinanceFeed.REQUIRED_CANDLES }, (_, index) => {
+      const openTime = latestOpenTime - (BinanceFeed.REQUIRED_CANDLES - index - 1) * intervalMs;
+      return {
+        time: new Date(openTime),
+        openTime,
+        closeTime: openTime + intervalMs - 1,
+        open: 100,
+        high: 101,
+        low: 99,
+        close: 100,
+        volume: 2,
+        isFinal: true,
+      };
+    })];
+  }));
   const feed = createFeed({
     logger: {
       info() {},
@@ -244,7 +274,7 @@ test('418 pauses REST bootstrap until the ban expires, then restores history whi
   feed.connect = () => {
     feed.connected = true;
   };
-  BinanceFeed.prototype.fetchCandles = async function fetchRejectedHistory() {
+  BinanceFeed.prototype.fetchCandles = async function fetchRejectedHistory(_symbol, interval) {
     requests += 1;
     if (requests === 1) {
       const error = new Error('DATA_FEED_OFFLINE: Binance historical request rejected');
@@ -253,7 +283,7 @@ test('418 pauses REST bootstrap until the ban expires, then restores history whi
       error.retryAfterMs = 20;
       throw error;
     }
-    return history;
+    return histories.get(interval);
   };
 
   try {
@@ -266,11 +296,19 @@ test('418 pauses REST bootstrap until the ban expires, then restores history whi
     assert.ok(loggedMessages.some((message) => message.includes('waiting for the ban to expire')));
 
     await new Promise((resolve) => setTimeout(resolve, 1_100));
-    assert.equal(requests, SYMBOLS.length + 1);
+    assert.ok(
+      requests >= SYMBOLS.length * config.entryIntervals.length
+        && requests <= SYMBOLS.length * config.entryIntervals.length + 1,
+      'retry only the histories needed to finish bootstrapping both intervals',
+    );
     assert.equal(feed.restIpBanned, false);
     assert.equal(feed.initialized, true);
     assert.equal(feed.bootstrapTimer, null);
     assert.ok(SYMBOLS.every((symbol) => feed.data.get(symbol).candles.length === 500));
+    for (const interval of config.entryIntervals) {
+      assert.ok(SYMBOLS.every((symbol) =>
+        feed.intervalData.get(interval).get(symbol).candles.length === 500));
+    }
 
     const symbol = SYMBOLS[0];
     feed.handleMessage(Buffer.from(JSON.stringify({

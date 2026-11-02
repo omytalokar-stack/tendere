@@ -16,6 +16,7 @@ const candleInterval = process.env.CANDLE_INTERVAL || '15m';
 if (!INTERVALS.has(candleInterval)) {
   throw new Error(`Unsupported CANDLE_INTERVAL: ${candleInterval}`);
 }
+const entryIntervals = [...new Set(['5m', '15m', candleInterval])];
 
 const binanceRestUrl = (process.env.BINANCE_REST_URL || 'https://data-api.binance.vision')
   .replace(/\/+$/, '');
@@ -37,6 +38,7 @@ const config = {
     .map((origin) => origin.trim())
     .filter(Boolean),
   candleInterval,
+  entryIntervals,
   botEnabled: (process.env.BOT_ENABLED || 'true').toLowerCase() === 'true',
   initialBalance: numberFromEnv('INITIAL_BALANCE_USDT', 10_000, { min: 1 }),
   leverage: numberFromEnv('PAPER_LEVERAGE', 1, { min: 1, max: 5 }),

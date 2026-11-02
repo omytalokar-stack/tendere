@@ -86,6 +86,11 @@ function getEntrySignal(analysis) {
   return null;
 }
 
+function getConfirmedEntrySignal(analysis, confirmationAnalysis) {
+  const direction = getEntrySignal(analysis);
+  return direction && getEntrySignal(confirmationAnalysis) === direction ? direction : null;
+}
+
 function analyzeCandles(candles, orderBook) {
   if (!Array.isArray(candles) || candles.length < MIN_CANDLES) throw insufficientData();
   if (!candles.every((candle) => candle.isFinal === true
@@ -209,6 +214,7 @@ function sizePosition({ balance, entryPrice, stopLoss, leverage }) {
 module.exports = {
   analyzeCandles,
   getEntrySignal,
+  getConfirmedEntrySignal,
   sizePosition,
   MIN_CANDLES,
   RISK_PERCENT,

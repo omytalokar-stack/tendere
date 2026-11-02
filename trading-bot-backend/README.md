@@ -23,7 +23,8 @@ Configure an external uptime monitor to request `GET /api/health/live`. This lig
 ## Trading defaults
 
 - Symbols: ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT, ADAUSDT, AVAXUSDT.
-- On each aligned completed candle close, the scanner checks all six symbols and allows only one open account position. Entries require at least 7 aligned votes from 10 real closed-candle indicators, current closed-candle volume greater than 1.5x the prior 20-candle average, and at least 60% matching top-20 Binance book pressure.
+- The scanner evaluates both 5-minute and 15-minute Binance candles. A 15-minute setup must pass the normal entry gates; a 5-minute setup is allowed only when the same symbol also has a qualifying 15-minute signal in the same direction. Both intervals require at least 7 aligned votes from 10 real closed-candle indicators, current closed-candle volume greater than 1.5x the prior 20-candle average, and at least 60% matching top-20 Binance book pressure.
+- Scans run only when all six symbols have aligned, verified closed candles for the relevant interval. The account still allows only one open paper position, and all existing sizing, margin, daily-loss, and symbol cooldown safeguards remain in effect.
 - Stop distance is 1.5 ATR; take-profit defaults to a 2:1 reward/risk ratio.
 - Quantity is calculated directly as `(wallet balance * 0.02) / absolute(entry price - stop price)`. Entries are skipped if their required margin plus entry fee exceeds available margin. Leverage defaults to 1x.
 - Each fill includes a 0.075% taker fee as well as the existing adverse execution adjustment. Entry fees reduce available margin immediately; realized wallet P&L is gross P&L minus both entry and exit fees.

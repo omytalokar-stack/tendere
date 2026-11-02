@@ -43,22 +43,24 @@ test('a closed candle crossing a stop-loss returns no assumed fill price', () =>
 
 test('fresh Binance depth keeps a quiet market ready and supplies a labeled midpoint quote', () => {
   const engine = new PaperTradingEngine({ logger: { info() {}, warn() {}, error() {} } });
-  const intervalMs = INTERVAL_MS[config.candleInterval];
-  const latestOpenTime = Math.floor(Date.now() / intervalMs) * intervalMs - intervalMs;
-  const candles = Array.from({ length: 500 }, (_, index) => {
-    const openTime = latestOpenTime - (499 - index) * intervalMs;
-    return {
-      time: new Date(openTime),
-      openTime,
-      closeTime: openTime + intervalMs - 1,
-      open: 100,
-      high: 101,
-      low: 99,
-      close: 100,
-      volume: 10,
-      isFinal: true,
-    };
-  });
+  const candlesByInterval = new Map(config.entryIntervals.map((interval) => {
+    const intervalMs = INTERVAL_MS[interval];
+    const latestOpenTime = Math.floor(Date.now() / intervalMs) * intervalMs - intervalMs;
+    return [interval, Array.from({ length: 500 }, (_, index) => {
+      const openTime = latestOpenTime - (499 - index) * intervalMs;
+      return {
+        time: new Date(openTime),
+        openTime,
+        closeTime: openTime + intervalMs - 1,
+        open: 100,
+        high: 101,
+        low: 99,
+        close: 100,
+        volume: 10,
+        isFinal: true,
+      };
+    })];
+  }));
   const staleTradeAt = new Date(Date.now() - 60_000);
   const orderBook = {
     symbol: 'ETHUSDT',
@@ -75,7 +77,10 @@ test('fresh Binance depth keeps a quiet market ready and supplies a labeled midp
   };
   engine.feed.connected = true;
   for (const symbol of SYMBOLS) {
-    engine.candles.set(symbol, candles);
+    for (const interval of config.entryIntervals) {
+      engine.candleHistories.get(interval).set(symbol, candlesByInterval.get(interval));
+      engine.candleErrors.get(interval).set(symbol, null);
+    }
     engine.orderBooks.set(symbol, { ...orderBook, symbol });
     engine.prices.set(symbol, 100);
     engine.feedStates.set(symbol, {

@@ -42,6 +42,7 @@ function createApp(engine) {
     try {
       return res.json({
         interval: config.candleInterval,
+        entryIntervals: config.entryIntervals,
         markets: engine.getAllMarketSnapshots(),
       });
     } catch (error) {
