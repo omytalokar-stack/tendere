@@ -4,7 +4,7 @@ const { config, SYMBOLS } = require('../config');
 
 const REQUIRED_CANDLES = 500;
 const REQUIRED_BOOK_LEVELS = 20;
-const BOOTSTRAP_SYMBOL_DELAY_MS = 500;
+const BOOTSTRAP_SYMBOL_DELAY_MS = 2_000;
 const REST_REQUEST_INTERVAL_MS = 150;
 const DEFAULT_BAN_COOLDOWN_MS = 5 * 60_000;
 let restRequestQueue = Promise.resolve();
@@ -143,6 +143,7 @@ class BinanceFeed {
     this.socket = null;
     this.reconnectTimer = null;
     this.bootstrapTimer = null;
+    this.restIpBanned = false;
     this.reconnectDelay = 1_000;
     this.bootstrapDelay = 5_000;
     this.stopped = true;
@@ -171,6 +172,8 @@ class BinanceFeed {
       const error = dataError(symbol, `HTTP ${cause.response?.status || 'request'}: ${detail}`);
       error.status = cause.response?.status;
       error.retryAfterMs = cause.retryAfterMs || retryAfterMs(cause);
+      error.isIpBan = cause.response?.status === 418
+        || /IP banned|banned until|too much request weight/i.test(String(detail));
       throw error;
     }
 
@@ -222,9 +225,13 @@ class BinanceFeed {
   }
 
   async bootstrapHistory() {
-    if (this.stopped || this.syncing) return;
+    if (this.stopped || this.syncing || this.restIpBanned) return;
+    if (!config.binanceRestBootstrapEnabled) {
+      this.restIpBanned = true;
+      this.logger.warn('Binance REST bootstrap disabled; accumulating candles from live WebSocket stream.');
+      return;
+    }
     this.syncing = true;
-    let rateLimitedError = null;
     try {
       for (let index = 0; index < SYMBOLS.length; index += 1) {
         const symbol = SYMBOLS[index];
@@ -246,8 +253,9 @@ class BinanceFeed {
         } catch (error) {
           this.markSymbolError(symbol, error);
           this.logger.error('Binance historical candle bootstrap failed', { symbol, error });
-          if (error.status === 418) {
-            rateLimitedError = error;
+          if (error.isIpBan || error.status === 418) {
+            this.restIpBanned = true;
+            this.logger.error('REST IP banned; accumulating candles from live WebSocket stream.');
             break;
           }
         }
@@ -257,8 +265,8 @@ class BinanceFeed {
 
       this.initialized = SYMBOLS.every((symbol) =>
         this.getHistoryError(symbol, this.data.get(symbol).candles) === null);
-      if (rateLimitedError) {
-        this.scheduleBootstrapRetry(rateLimitedError);
+      if (this.restIpBanned) {
+        this.bootstrapTimer = null;
       } else if (!this.initialized) {
         this.scheduleBootstrapRetry();
       } else {
@@ -426,7 +434,7 @@ class BinanceFeed {
   }
 
   scheduleBootstrapRetry(error) {
-    if (this.stopped || this.bootstrapTimer) return;
+    if (this.stopped || this.restIpBanned || this.bootstrapTimer) return;
     const delay = Math.max(this.bootstrapDelay, error?.retryAfterMs || 0);
     this.bootstrapDelay = Math.min(this.bootstrapDelay * 2, 30 * 60_000);
     this.bootstrapTimer = setTimeout(() => {

@@ -17,6 +17,17 @@ if (!INTERVALS.has(candleInterval)) {
   throw new Error(`Unsupported CANDLE_INTERVAL: ${candleInterval}`);
 }
 
+const binanceRestUrl = (process.env.BINANCE_REST_URL || 'https://data-api.binance.vision')
+  .replace(/\/+$/, '');
+const binanceRestHostname = new URL(binanceRestUrl).hostname.toLowerCase();
+if (binanceRestHostname === 'api.binance.com' || /^api[1-3]\.binance\.com$/.test(binanceRestHostname)) {
+  throw new Error('BINANCE_REST_URL must use https://data-api.binance.vision, not the Binance trading API host');
+}
+const restBootstrapSetting = (process.env.BINANCE_REST_BOOTSTRAP_ENABLED || 'true').toLowerCase();
+if (restBootstrapSetting !== 'true' && restBootstrapSetting !== 'false') {
+  throw new Error('BINANCE_REST_BOOTSTRAP_ENABLED must be true or false');
+}
+
 const config = {
   port: numberFromEnv('PORT', 3001, { min: 1, max: 65535 }),
   mongoUri: process.env.MONGODB_URI,
@@ -31,7 +42,8 @@ const config = {
   leverage: numberFromEnv('PAPER_LEVERAGE', 1, { min: 1, max: 5 }),
   rewardRiskRatio: numberFromEnv('REWARD_RISK_RATIO', 2, { min: 1, max: 10 }),
   dailyLossLimit: numberFromEnv('DAILY_LOSS_LIMIT_USDT', 400, { min: 1 }),
-  binanceRestUrl: process.env.BINANCE_REST_URL || 'https://data-api.binance.vision',
+  binanceRestUrl,
+  binanceRestBootstrapEnabled: restBootstrapSetting === 'true',
   binanceWsUrl: process.env.BINANCE_WS_URL || 'wss://data-stream.binance.vision/stream',
 };
 

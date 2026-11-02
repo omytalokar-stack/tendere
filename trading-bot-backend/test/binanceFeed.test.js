@@ -1,4 +1,6 @@
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
+const path = require('node:path');
 const test = require('node:test');
 const axios = require('axios');
 const { config, SYMBOLS } = require('../src/config');
@@ -17,9 +19,35 @@ function createFeed(callbacks = {}) {
     onPrice: callbacks.onPrice || (() => {}),
     onOrderBook: callbacks.onOrderBook || (() => {}),
     onFeedState: callbacks.onFeedState || (() => {}),
-    logger: { info() {}, warn() {}, error() {} },
+    logger: callbacks.logger || { info() {}, warn() {}, error() {} },
   });
 }
+
+test('REST defaults to Binance data API and rejects trading API host fallbacks', () => {
+  const backendDirectory = path.resolve(__dirname, '..');
+  const defaultHost = spawnSync(process.execPath, [
+    '-e',
+    "process.stdout.write(require('./src/config').config.binanceRestUrl)",
+  ], {
+    cwd: backendDirectory,
+    env: { ...process.env, BINANCE_REST_URL: '' },
+    encoding: 'utf8',
+  });
+  assert.equal(defaultHost.status, 0, defaultHost.stderr);
+  assert.equal(defaultHost.stdout, 'https://data-api.binance.vision');
+
+  const forbiddenHost = spawnSync(process.execPath, [
+    '-e',
+    "require('./src/config')",
+  ], {
+    cwd: backendDirectory,
+    env: { ...process.env, BINANCE_REST_URL: 'https://api.binance.com' },
+    encoding: 'utf8',
+  });
+  assert.notEqual(forbiddenHost.status, 0);
+  assert.match(forbiddenHost.stderr, /must use https:\/\/data-api\.binance\.vision/);
+  assert.equal(BinanceFeed.BOOTSTRAP_SYMBOL_DELAY_MS, 2_000);
+});
 
 test('historical candles use the configured REST host and validate real closed history', async () => {
   const originalGet = axios.get;
@@ -153,10 +181,17 @@ test('WebSocket trade, depth, and closed-kline events update live feed state', a
   assert.equal(feed.data.get(symbol).candles.length, 1);
 });
 
-test('418 during sequential bootstrap keeps WebSocket live and schedules delayed history retry', async () => {
+test('418 stops all REST bootstrap requests while keeping WebSocket live', async () => {
   const originalFetchCandles = BinanceFeed.prototype.fetchCandles;
   let requests = 0;
-  const feed = createFeed();
+  const loggedMessages = [];
+  const feed = createFeed({
+    logger: {
+      info() {},
+      warn(message) { loggedMessages.push(message); },
+      error(message) { loggedMessages.push(message); },
+    },
+  });
   feed.connect = () => {
     feed.connected = true;
   };
@@ -174,7 +209,11 @@ test('418 during sequential bootstrap keeps WebSocket live and schedules delayed
     assert.equal(requests, 1, 'stop bootstrap requests immediately on an IP-ban response');
     assert.equal(feed.connected, true);
     assert.equal(feed.initialized, false);
-    assert.ok(feed.bootstrapTimer);
+    assert.equal(feed.bootstrapTimer, null);
+    assert.equal(feed.restIpBanned, true);
+    await feed.bootstrapHistory();
+    assert.equal(requests, 1, 'a banned feed must never retry historical REST requests');
+    assert.ok(loggedMessages.includes('REST IP banned; accumulating candles from live WebSocket stream.'));
 
     const symbol = SYMBOLS[0];
     feed.handleMessage(Buffer.from(JSON.stringify({
@@ -184,6 +223,42 @@ test('418 during sequential bootstrap keeps WebSocket live and schedules delayed
     assert.equal(feed.data.get(symbol).price, 100, 'live stream continues during REST ban');
   } finally {
     feed.stop();
+    BinanceFeed.prototype.fetchCandles = originalFetchCandles;
+  }
+});
+
+test('REST bootstrap can be disabled before starting on an already-banned IP', async () => {
+  const originalSetting = config.binanceRestBootstrapEnabled;
+  const originalFetchCandles = BinanceFeed.prototype.fetchCandles;
+  let requests = 0;
+  const loggedMessages = [];
+  config.binanceRestBootstrapEnabled = false;
+  const feed = createFeed({
+    logger: {
+      info() {},
+      warn(message) { loggedMessages.push(message); },
+      error(message) { loggedMessages.push(message); },
+    },
+  });
+  feed.connect = () => {
+    feed.connected = true;
+  };
+  BinanceFeed.prototype.fetchCandles = async () => {
+    requests += 1;
+    throw new Error('REST bootstrap should remain disabled');
+  };
+
+  try {
+    await feed.start();
+    assert.equal(requests, 0);
+    assert.equal(feed.connected, true);
+    assert.equal(feed.restIpBanned, true);
+    assert.ok(loggedMessages.includes(
+      'Binance REST bootstrap disabled; accumulating candles from live WebSocket stream.',
+    ));
+  } finally {
+    feed.stop();
+    config.binanceRestBootstrapEnabled = originalSetting;
     BinanceFeed.prototype.fetchCandles = originalFetchCandles;
   }
 });
