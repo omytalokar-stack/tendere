@@ -368,8 +368,6 @@ class PaperTradingEngine {
       return this.isCandleHistoryComplete(candles)
         && !state?.error
         && !state?.orderBookError
-        && state?.lastTradeAt
-        && Date.now() - new Date(state.lastTradeAt).getTime() <= MAX_MARKET_DATA_AGE_MS
         && this.isOrderBookFresh(orderBook);
     });
   }
@@ -398,10 +396,7 @@ class PaperTradingEngine {
     if (this.closingTrades.has(tradeId)) return null;
     this.closingTrades.add(tradeId);
     try {
-      const state = this.feedStates.get(trade.symbol);
-      if (!this.feed.connected
-        || !state?.lastTradeAt
-        || Date.now() - new Date(state.lastTradeAt).getTime() > MAX_MARKET_DATA_AGE_MS) return null;
+      if (!this.feed.connected) return null;
       const orderBook = await this.refreshExecutionBook(trade.symbol);
       if (!this.isOrderBookFresh(orderBook)) return null;
       const quote = trade.side === 'LONG' ? orderBook.bestBid : orderBook.bestAsk;
@@ -644,23 +639,33 @@ class PaperTradingEngine {
     const orderBook = this.orderBooks.get(symbol);
     const state = this.feedStates.get(symbol);
     const lastTradeAt = state?.lastTradeAt;
-    const marketAge = lastTradeAt ? Date.now() - new Date(lastTradeAt).getTime() : Infinity;
+    const lastTradeAge = lastTradeAt ? Date.now() - new Date(lastTradeAt).getTime() : Infinity;
+    const orderBookFresh = this.isOrderBookFresh(orderBook);
+    const priceSource = lastTradeAge <= MAX_MARKET_DATA_AGE_MS
+      && Number.isFinite(this.prices.get(symbol))
+      ? 'TRADE'
+      : orderBookFresh ? 'ORDER_BOOK_MID' : null;
+    const quoteUpdatedAt = priceSource === 'TRADE' ? lastTradeAt : orderBook?.updatedAt;
+    const marketAge = quoteUpdatedAt ? Date.now() - new Date(quoteUpdatedAt).getTime() : Infinity;
     const candleError = state?.error
       || (candles.length !== REQUIRED_CANDLES
         ? `DATA_FEED_OFFLINE: Binance real feed failed for ${symbol}: expected ${REQUIRED_CANDLES} completed candles, received ${candles.length}`
         : !this.isCandleHistoryComplete(candles)
           ? `DATA_FEED_OFFLINE: Binance real feed failed for ${symbol}: completed candle history is invalid or contains a time gap`
           : null)
-      || (!lastTradeAt || marketAge > MAX_MARKET_DATA_AGE_MS
-        ? `DATA_FEED_OFFLINE: Binance real feed failed for ${symbol}: no fresh trade tick`
+      || (!quoteUpdatedAt || marketAge > MAX_MARKET_DATA_AGE_MS
+        ? `DATA_FEED_OFFLINE: Binance real feed failed for ${symbol}: no fresh trade or order-book quote`
         : null);
     const orderBookError = state?.orderBookError
-      || (!this.isOrderBookFresh(orderBook) ? 'ORDERBOOK_DISCONNECTED' : null);
+      || (!orderBookFresh ? 'ORDERBOOK_DISCONNECTED' : null);
     return {
       symbol,
       candles,
       orderBook,
-      price: this.prices.get(symbol) ?? null,
+      price: priceSource === 'TRADE'
+        ? this.prices.get(symbol) ?? null
+        : orderBookFresh ? (orderBook.bestBid + orderBook.bestAsk) / 2 : this.prices.get(symbol) ?? null,
+      priceSource,
       lastTradeAt: lastTradeAt ?? null,
       marketAgeMs: Number.isFinite(marketAge) ? marketAge : null,
       candleError,
@@ -700,6 +705,7 @@ class PaperTradingEngine {
     return markets.map((market) => ({
       symbol: market.symbol,
       price: market.price,
+      priceSource: market.priceSource,
       lastTradeAt: market.lastTradeAt,
       marketAgeMs: market.marketAgeMs,
       candleCount: market.candles.length,

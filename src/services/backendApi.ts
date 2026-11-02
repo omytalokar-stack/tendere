@@ -22,6 +22,7 @@ export interface BackendStatus {
 export interface BackendMarket {
   symbol: string;
   price: number;
+  priceSource: 'TRADE' | 'ORDER_BOOK_MID';
   lastTradeAt: string;
   marketAgeMs: number;
   candleCount: number;
@@ -170,6 +171,7 @@ export async function getBackendSnapshot(signal?: AbortSignal): Promise<BackendS
     || !marketResponse.markets.every((market) =>
       status.symbols.includes(market.symbol)
       && Number.isFinite(market.price)
+      && ['TRADE', 'ORDER_BOOK_MID'].includes(market.priceSource)
       && market.candleCount === 500
       && market.orderBook?.levelCount === 20
       && Array.isArray(market.orderBook.bids)

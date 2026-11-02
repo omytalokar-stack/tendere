@@ -548,6 +548,7 @@ function HomeTab({
               <div className="rounded-2xl border border-purple-400/10 bg-black/20 p-3">
                 <p className="text-[10px] uppercase tracking-wider text-slate-500">Live Binance price</p>
                 <p className="mt-1 font-mono text-sm text-white">${formatPrice(market.price, coin.decimals)}</p>
+                {market.priceSource === 'ORDER_BOOK_MID' && <p className="mt-1 text-[9px] text-slate-500">Live L2 midpoint</p>}
               </div>
             </div>
 
@@ -642,6 +643,7 @@ function StrategyTab({
                   </span>
                 </div>
                 <p className="mt-3 font-mono text-lg text-white">${formatPrice(market.price, coin.decimals)}</p>
+                {market.priceSource === 'ORDER_BOOK_MID' && <p className="mt-1 text-[9px] text-slate-500">Live L2 midpoint</p>}
                 <div className="mt-3 flex items-center justify-between text-[10px] font-mono">
                   <span className="text-emerald-300">{buyVotes}/{totalVotes} BUY</span>
                   <span className="text-pink-300">{sellVotes}/{totalVotes} SELL</span>
@@ -662,7 +664,12 @@ function StrategyTab({
             <div>
               <p className="text-[10px] font-mono uppercase tracking-[.2em] text-pink-300/70">Real-data inspector</p>
               <h2 className="mt-1 text-lg font-bold text-white">{selectedCoin.symbol} <span className="text-sm font-normal text-slate-400">{selectedCoin.name}</span></h2>
-              <p className="mt-1 font-mono text-sm text-purple-200">${formatPrice(selectedMarket.price, selectedCoin.decimals)}</p>
+              <p className="mt-1 font-mono text-sm text-purple-200">
+                ${formatPrice(selectedMarket.price, selectedCoin.decimals)}
+                <span className="ml-2 text-[10px] text-slate-500">
+                  {selectedMarket.priceSource === 'ORDER_BOOK_MID' ? 'Binance L2 midpoint' : 'Binance last trade'}
+                </span>
+              </p>
             </div>
             <button
               disabled={candleLoading || Boolean(candleError) || candles.length !== 500}
@@ -813,7 +820,7 @@ function HealthTab({
         <HealthCard icon={<Radio />} label="Binance WebSocket" value={snapshot?.status.feedConnected ? 'Connected' : 'Disconnected'} ok={Boolean(snapshot?.status.feedConnected)} />
         <HealthCard icon={<CheckCircle2 />} label="Market readiness" value={snapshot?.status.marketDataReady ? '6 markets verified' : 'Data gate closed'} ok={feedOk} />
         <HealthCard icon={<RefreshCw />} label="API refresh latency" value={latencyMs === null ? 'Unavailable' : `${latencyMs} ms`} ok={latencyMs !== null && latencyMs < 1500} />
-        <HealthCard icon={<Clock />} label="Oldest live tick" value={tickAgeMs === null ? 'Unavailable' : `${(tickAgeMs / 1000).toFixed(1)} sec`} ok={tickAgeMs !== null && tickAgeMs <= 15_000} />
+        <HealthCard icon={<Clock />} label="Oldest live quote" value={tickAgeMs === null ? 'Unavailable' : `${(tickAgeMs / 1000).toFixed(1)} sec`} ok={tickAgeMs !== null && tickAgeMs <= 15_000} />
         <HealthCard icon={<Shield />} label="Strict risk shield" value={snapshot ? `${snapshot.status.riskPercent}% per trade` : 'Unavailable'} ok={riskOk} />
         <HealthCard icon={<CheckCircle2 />} label="Binance taker fee" value={snapshot ? `${(snapshot.status.takerFeeRate * 100).toFixed(3)}% per fill` : 'Unavailable'} ok={Boolean(snapshot)} />
       </div>

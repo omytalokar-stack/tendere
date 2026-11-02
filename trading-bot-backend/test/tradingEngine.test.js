@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const mongoose = require('mongoose');
-const { config } = require('../src/config');
+const { config, SYMBOLS } = require('../src/config');
 const PaperTrade = require('../src/models/PaperTrade');
 const VirtualWallet = require('../src/models/VirtualWallet');
 const PaperTradingEngine = require('../src/services/paperTradingEngine');
@@ -39,6 +39,87 @@ test('a closed candle crossing a stop-loss returns no assumed fill price', () =>
     { open: 107, high: 108, low: 88 }
   );
   assert.deepEqual(exit, { reason: 'STOP_LOSS' });
+});
+
+test('fresh Binance depth keeps a quiet market ready and supplies a labeled midpoint quote', () => {
+  const engine = new PaperTradingEngine({ logger: { info() {}, warn() {}, error() {} } });
+  const intervalMs = INTERVAL_MS[config.candleInterval];
+  const latestOpenTime = Math.floor(Date.now() / intervalMs) * intervalMs - intervalMs;
+  const candles = Array.from({ length: 500 }, (_, index) => {
+    const openTime = latestOpenTime - (499 - index) * intervalMs;
+    return {
+      time: new Date(openTime),
+      openTime,
+      closeTime: openTime + intervalMs - 1,
+      open: 100,
+      high: 101,
+      low: 99,
+      close: 100,
+      volume: 10,
+      isFinal: true,
+    };
+  });
+  const staleTradeAt = new Date(Date.now() - 60_000);
+  const orderBook = {
+    symbol: 'ETHUSDT',
+    bids: Array.from({ length: 20 }, (_, index) => ({ price: 99 - index, quantity: 1 })),
+    asks: Array.from({ length: 20 }, (_, index) => ({ price: 101 + index, quantity: 1 })),
+    bestBid: 99,
+    bestAsk: 101,
+    bidQuantity: 20,
+    askQuantity: 20,
+    bidNotional: 0,
+    askNotional: 0,
+    levelCount: 20,
+    updatedAt: new Date(),
+  };
+  engine.feed.connected = true;
+  for (const symbol of SYMBOLS) {
+    engine.candles.set(symbol, candles);
+    engine.orderBooks.set(symbol, { ...orderBook, symbol });
+    engine.prices.set(symbol, 100);
+    engine.feedStates.set(symbol, {
+      error: null,
+      orderBookError: null,
+      lastTradeAt: staleTradeAt,
+      updatedAt: new Date(),
+    });
+  }
+
+  assert.equal(engine.allMarketDataReady(), true);
+  const market = engine.getMarketSnapshot('ETHUSDT');
+  assert.equal(market.ready, true);
+  assert.equal(market.price, 100);
+  assert.equal(market.priceSource, 'ORDER_BOOK_MID');
+  assert.ok(market.marketAgeMs < 15_000);
+
+  engine.orderBooks.set('ETHUSDT', { ...orderBook, updatedAt: new Date(Date.now() - 60_000) });
+  assert.equal(engine.allMarketDataReady(), false);
+  assert.equal(engine.getMarketSnapshot('ETHUSDT').ready, false);
+});
+
+test('paper exits use a fresh Binance depth quote even when the last trade tick is quiet', async () => {
+  const engine = new PaperTradingEngine({ logger: { info() {}, warn() {}, error() {} } });
+  engine.feed.connected = true;
+  engine.orderBooks.set('ETHUSDT', {
+    bids: Array.from({ length: 20 }, (_, index) => ({ price: 99 - index, quantity: 1 })),
+    asks: Array.from({ length: 20 }, (_, index) => ({ price: 101 + index, quantity: 1 })),
+    bestBid: 99,
+    bestAsk: 101,
+    updatedAt: new Date(),
+  });
+  engine.feedStates.set('ETHUSDT', { lastTradeAt: new Date(Date.now() - 60_000) });
+  engine.closeTrade = async (...args) => args;
+  const result = await engine.closeAtMarket({
+    _id: 'paper-trade-test',
+    symbol: 'ETHUSDT',
+    side: 'LONG',
+  }, 'MANUAL');
+
+  assert.equal(result[0], 'paper-trade-test');
+  assert.equal(result[1], 98.92575);
+  assert.equal(result[2], 'MANUAL');
+  assert.equal(result[3], 99);
 });
 
 test('paper trade schema persists fees, stop-loss feedback, and one account-wide open position', () => {
