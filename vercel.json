@@ -1,0 +1,24 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/health/:path*",
+      "destination": "https://tendere.onrender.com/api/health/:path*"
+    },
+    {
+      "source": "/api/bot/:path*",
+      "destination": "https://tendere.onrender.com/api/bot/:path*"
+    },
+    {
+      "source": "/api/wallet",
+      "destination": "https://tendere.onrender.com/api/wallet"
+    },
+    {
+      "source": "/api/trades/:path*",
+      "destination": "https://tendere.onrender.com/api/trades/:path*"
+    },
+    {
+      "source": "/api/market/:path*",
+      "destination": "https://tendere.onrender.com/api/market/:path*"
+    }
+  ]
+}
