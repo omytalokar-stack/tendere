@@ -181,6 +181,33 @@ test('WebSocket trade, depth, and closed-kline events update live feed state', a
   assert.equal(feed.data.get(symbol).candles.length, 1);
 });
 
+test('combined WebSocket partial-depth messages update the order book', () => {
+  const books = [];
+  const feedStates = [];
+  const feed = createFeed({
+    onOrderBook: (symbol, orderBook) => books.push({ symbol, orderBook }),
+    onFeedState: (symbol, state) => feedStates.push({ symbol, state }),
+  });
+  const symbol = SYMBOLS[0];
+
+  feed.handleMessage(Buffer.from(JSON.stringify({
+    stream: `${symbol.toLowerCase()}@depth20@1000ms`,
+    data: {
+      lastUpdateId: 123,
+      bids: validDepthLevels(123.4, true),
+      asks: validDepthLevels(123.5, false),
+    },
+  })));
+
+  assert.equal(books.length, 1);
+  assert.equal(books[0].symbol, symbol);
+  assert.equal(books[0].orderBook.levelCount, 20);
+  assert.equal(books[0].orderBook.bestBid, 123.4);
+  assert.equal(books[0].orderBook.bestAsk, 123.5);
+  assert.equal(feed.data.get(symbol).orderBookError, null);
+  assert.deepEqual(feedStates, [{ symbol, state: { orderBookError: null } }]);
+});
+
 test('418 stops all REST bootstrap requests while keeping WebSocket live', async () => {
   const originalFetchCandles = BinanceFeed.prototype.fetchCandles;
   let requests = 0;

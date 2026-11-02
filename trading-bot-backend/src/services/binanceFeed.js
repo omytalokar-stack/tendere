@@ -345,7 +345,8 @@ class BinanceFeed {
     try {
       const payload = JSON.parse(buffer.toString());
       const event = payload.data || payload;
-      if (!event || !this.data.has(event.s)) return;
+      const symbol = event?.s || payload.stream?.split('@')[0].toUpperCase();
+      if (!event || !this.data.has(symbol)) return;
 
       if (event.e === 'trade') {
         const price = Number(event.p);
@@ -361,19 +362,19 @@ class BinanceFeed {
         return;
       }
 
-      if (event.e === 'depthUpdate') {
+      if (event.e === 'depthUpdate' || payload.stream?.includes('@depth')) {
         const orderBook = normalizeDepth(
-          event.s,
-          event.b,
-          event.a,
+          symbol,
+          event.b || event.bids,
+          event.a || event.asks,
           event.E === undefined ? new Date() : new Date(Number(event.E)),
         );
-        const current = this.data.get(event.s);
+        const current = this.data.get(symbol);
         current.orderBook = orderBook;
         current.orderBookError = null;
-        this.data.set(event.s, current);
-        this.onOrderBook(event.s, orderBook);
-        this.onFeedState(event.s, { orderBookError: null });
+        this.data.set(symbol, current);
+        this.onOrderBook(symbol, orderBook);
+        this.onFeedState(symbol, { orderBookError: null });
         return;
       }
 
