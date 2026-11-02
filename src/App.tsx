@@ -498,8 +498,24 @@ function HomeTab({
           <div className="absolute inset-0 rounded-full bg-purple-500/10 animate-ping" />
           <div className="absolute inset-2 rounded-full border border-purple-400/20" />
           <div className="relative flex h-20 w-20 items-center justify-center rounded-full border border-purple-300/30 bg-gradient-to-br from-purple-500/20 to-pink-500/10 shadow-[0_0_40px_rgba(168,85,247,.2)]">
-            <Activity className="h-9 w-9 text-purple-200 animate-radar" />
-            <span className="absolute h-2.5 w-2.5 rounded-full bg-pink-300 shadow-[0_0_16px_#f472b6]" />
+            <svg viewBox="0 0 64 64" role="img" aria-label="Black cat mascot" className="h-12 w-12">
+              <path
+                d="M23 39c-6 2-10 7-10 15l-3 7h20l2-7h4l2 7h20l-3-8c0-7-5-12-11-14Z"
+                fill="#08060d"
+                stroke="#a78bfa"
+                strokeLinejoin="round"
+                strokeWidth="1.5"
+              />
+              <path
+                d="m19 30-5-20 17 10a18 18 0 0 1 8 0l17-10-5 21c4 3 6 7 6 12 0 9-8 15-22 15S13 52 13 43c0-5 2-10 6-13Z"
+                fill="#08060d"
+                stroke="#a78bfa"
+                strokeLinejoin="round"
+                strokeWidth="1.5"
+              />
+              <path d="M21 39c2-3 6-3 8 0-2 3-6 3-8 0Zm14 0c2-3 6-3 8 0-2 3-6 3-8 0Z" fill="#f9a8d4" />
+              <path d="m30 45 2-2 2 2-2 2z" fill="#f472b6" />
+            </svg>
           </div>
         </div>
         <p className="mb-2 text-[10px] font-mono uppercase tracking-[.25em] text-purple-300/70">AuraAlgo · Paper engine</p>
