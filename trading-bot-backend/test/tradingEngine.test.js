@@ -157,13 +157,19 @@ test('opening a position reserves its entry fee from available margin immediatel
     findOne: PaperTrade.findOne,
     findOneAndUpdate: VirtualWallet.findOneAndUpdate,
     create: PaperTrade.create,
+    fetch: global.fetch,
   };
   let walletUpdate;
+  let notificationRequest;
   mongoose.startSession = async () => ({
     withTransaction: async (operation) => operation(),
     endSession: async () => {},
   });
   PaperTrade.findOne = () => ({ session: async () => null });
+  global.fetch = async (url, options) => {
+    notificationRequest = { url, options };
+    return { ok: true, status: 200 };
+  };
   VirtualWallet.findOneAndUpdate = async (filter, update) => {
     walletUpdate = { filter, update };
     return { _id: 'primary' };
@@ -174,11 +180,16 @@ test('opening a position reserves its entry fee from available margin immediatel
     const opened = await engine.openTrade({
       symbol: 'ETHUSDT',
       side: 'LONG',
+      entryPrice: 100,
+      stopLoss: 95,
+      takeProfit: 110,
       margin: 4_000,
       entryFeeUsd: 6,
       quantity: 40,
     });
     assert.equal(opened.id, 'paper-trade-test');
+    assert.equal(notificationRequest.options.headers.Title, 'AuraAlgo: New Trade');
+    assert.match(notificationRequest.options.body, /Direction: LONG/);
     assert.deepEqual(walletUpdate.filter, {
       _id: 'primary',
       availableMargin: { $gte: 4_006 },
@@ -190,6 +201,7 @@ test('opening a position reserves its entry fee from available margin immediatel
     PaperTrade.findOne = originals.findOne;
     VirtualWallet.findOneAndUpdate = originals.findOneAndUpdate;
     PaperTrade.create = originals.create;
+    global.fetch = originals.fetch;
   }
 });
 
@@ -199,6 +211,7 @@ test('closing a losing stop updates wallet with net P&L and persists failure fee
     findOne: PaperTrade.findOne,
     updateTrade: PaperTrade.updateOne,
     updateWallet: VirtualWallet.findOneAndUpdate,
+    fetch: global.fetch,
   };
   const trade = {
     _id: 'paper-trade-test',
@@ -213,6 +226,7 @@ test('closing a losing stop updates wallet with net P&L and persists failure fee
   };
   let tradeUpdate;
   let walletUpdate;
+  let notificationRequest;
   mongoose.startSession = async () => ({
     withTransaction: async (operation) => operation(),
     endSession: async () => {},
@@ -221,6 +235,10 @@ test('closing a losing stop updates wallet with net P&L and persists failure fee
   PaperTrade.updateOne = async (_filter, update) => {
     tradeUpdate = update;
     return { matchedCount: 1 };
+  };
+  global.fetch = async (url, options) => {
+    notificationRequest = { url, options };
+    return { ok: true, status: 200 };
   };
   VirtualWallet.findOneAndUpdate = async (_filter, update) => {
     walletUpdate = update;
@@ -242,6 +260,9 @@ test('closing a losing stop updates wallet with net P&L and persists failure fee
       failureAnalysis,
     );
     assert.equal(closed.grossPnlUsd, -20);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(notificationRequest.options.headers.Title, 'AuraAlgo: Trade Closed');
+    assert.match(notificationRequest.options.body, /Exit Reason: STOP_LOSS/);
     assert.equal(closed.totalFeesUsd, 0.285);
     assert.equal(closed.pnlUsd, -20.285);
     assert.equal(tradeUpdate.$set.pnlUsd, -20.285);
@@ -259,6 +280,7 @@ test('closing a losing stop updates wallet with net P&L and persists failure fee
     PaperTrade.findOne = originals.findOne;
     PaperTrade.updateOne = originals.updateTrade;
     VirtualWallet.findOneAndUpdate = originals.updateWallet;
+    global.fetch = originals.fetch;
   }
 });
 

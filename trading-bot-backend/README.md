@@ -14,7 +14,9 @@ Paper entries and exits use a fresh Binance Spot depth quote (best ask for buys,
 
 ## Browser notifications and uptime checks
 
-Enable browser trade alerts from the dashboard header. The frontend requests notification permission and registers a service worker, then detects trade entry, exit, and losing-stop cooldown changes through its three-second backend polling. Notifications can appear while the page is open or backgrounded, subject to browser throttling; they are not delivered after the browser/page is closed. True closed-browser Web Push requires a push subscription and a server-side push service, which this application does not configure.
+Enable browser trade alerts from the dashboard header. The frontend requests notification permission and registers a service worker, then detects trade entry, exit, and losing-stop cooldown changes through its three-second backend polling. Notifications can appear while the page is open or backgrounded, subject to browser throttling.
+
+The backend also sends ntfy.sh alerts directly for paper trade entries, exits, and daily loss-limit trips, so those alerts do not depend on the dashboard being open. Configure `NTFY_TOPIC` in the backend environment (default: `auraalgo_live_897k3_rajesh`). ntfy topics are public to anyone who knows their name; replace the default with a long, random topic and keep it private. Failed/timed-out notification requests are logged and do not affect trade execution.
 
 Configure an external uptime monitor to request `GET /api/health/live`. This lightweight endpoint returns HTTP 200 with `{ "status": "ok", "timestamp": "..." }` without querying MongoDB or Binance. It can help keep a Render instance warm but does not replace an always-on Render plan for continuous trading.
 

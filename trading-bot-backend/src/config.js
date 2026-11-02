@@ -42,6 +42,7 @@ const config = {
   leverage: numberFromEnv('PAPER_LEVERAGE', 1, { min: 1, max: 5 }),
   rewardRiskRatio: numberFromEnv('REWARD_RISK_RATIO', 2, { min: 1, max: 10 }),
   dailyLossLimit: numberFromEnv('DAILY_LOSS_LIMIT_USDT', 400, { min: 1 }),
+  ntfyTopic: process.env.NTFY_TOPIC || 'auraalgo_live_897k3_rajesh',
   binanceRestUrl,
   binanceRestBootstrapEnabled: restBootstrapSetting === 'true',
   binanceWsUrl: process.env.BINANCE_WS_URL || 'wss://data-stream.binance.vision/stream',

@@ -12,6 +12,11 @@ const {
   MIN_CANDLES,
 } = require('./strategy');
 const { REQUIRED_CANDLES } = require('./binanceFeed');
+const {
+  notifyTradeOpened,
+  notifyTradeClosed,
+  notifyDailyLossLimit,
+} = require('./notificationAlerts');
 const TAKER_SLIPPAGE_RATE = 0.00075;
 const TAKER_FEE_RATE = 0.00075;
 const COOLDOWN_CANDLES = 3;
@@ -38,6 +43,7 @@ class PaperTradingEngine {
     this.orderBooks = new Map();
     this.pendingExits = new Map();
     this.closingTrades = new Set();
+    this.dailyLossAlertDate = null;
     this.auditLog = [];
     this.feedStates = new Map(SYMBOLS.map((symbol) => [symbol, {
       error: `DATA_FEED_OFFLINE: Binance real feed failed for ${symbol}: awaiting initial synchronization`,
@@ -241,6 +247,7 @@ class PaperTradingEngine {
     if (await PaperTrade.exists({ status: 'OPEN' })) return;
     if (await this.dailyLossLimitReached()) {
       this.logger.warn('Daily loss limit reached; new paper positions are paused');
+      this.sendDailyLossAlertOnce();
       return;
     }
 
@@ -446,6 +453,22 @@ class PaperTradingEngine {
     return Math.abs(result[0]?.loss || 0) >= config.dailyLossLimit;
   }
 
+  sendDailyLossAlertOnce() {
+    const today = new Date().toISOString().slice(0, 10);
+    if (this.dailyLossAlertDate === today) return;
+    this.dailyLossAlertDate = today;
+    this.dispatchNotification('daily loss limit', () =>
+      notifyDailyLossLimit(config.dailyLossLimit, this.logger));
+  }
+
+  dispatchNotification(event, send) {
+    void Promise.resolve()
+      .then(send)
+      .catch((error) => {
+        this.logger.warn('Paper trading notification failed', { event, error });
+      });
+  }
+
   calculateTradeResult(trade, exitPrice) {
     const sign = trade.side === 'LONG' ? 1 : -1;
     const grossPnlUsd = round(sign * (exitPrice - trade.entryPrice) * trade.quantity, 8);
@@ -499,6 +522,8 @@ class PaperTradingEngine {
           entryFeeUsd: tradeData.entryFeeUsd,
         });
         this.recordAudit('TRADE', tradeData.symbol, `Opened ${tradeData.side} paper position`);
+        this.dispatchNotification('trade opened', () =>
+          notifyTradeOpened(createdTrade, this.logger));
       }
       return createdTrade || null;
     } catch (error) {
@@ -590,6 +615,8 @@ class PaperTradingEngine {
       });
       if (closedTrade) this.logger.info('Paper position closed', closedTrade);
       if (closedTrade) {
+        this.dispatchNotification('trade closed', () =>
+          notifyTradeClosed(closedTrade, this.logger));
         const cooldownMessage = closedTrade.cooldownUntil
           ? `; symbol cooldown until ${closedTrade.cooldownUntil.toISOString()}`
           : '';

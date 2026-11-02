@@ -51,7 +51,7 @@ Render (Node.js/Express)
 - Tabs: Home, Strategy, Brain Health, Wallet.
 - Strategy offers a per-symbol indicator inspector and an in-app candlestick view.
 - The chart uses finalized Binance candle data; the candle graphic is rendered by this app.
-- Browser notifications are optional. `public/sw.js` handles notification clicks; this is not a server-side push delivery system.
+- Browser notifications are optional and depend on dashboard polling; `public/sw.js` handles notification clicks. The backend separately sends best-effort ntfy.sh alerts for paper-trade opens/closes and daily loss-limit trips, independent of the dashboard being open.
 - Home's idle mascot is a black cat with a heartbeat pulse. The animation respects reduced-motion preference.
 - `favicon.ico` has previously returned 404; this does not cause market API errors.
 
@@ -184,6 +184,7 @@ Error codes such as `DATA_FEED_OFFLINE`, `INSUFFICIENT_HISTORICAL_DATA`, and `OR
   - `PAPER_LEVERAGE`: default 1, allowed 1–5.
   - `REWARD_RISK_RATIO`: default 2, allowed 1–10.
   - `DAILY_LOSS_LIMIT_USDT`: default 400.
+  - `NTFY_TOPIC`: ntfy.sh topic for backend trade/circuit-breaker alerts; defaults to `auraalgo_live_897k3_rajesh`. Use a long random topic and keep it private because anyone who knows it can subscribe or publish.
   - `BINANCE_REST_URL`: default `https://data-api.binance.vision`.
   - `BINANCE_REST_BOOTSTRAP_ENABLED`: default true.
   - `BINANCE_WS_URL`: default `wss://data-stream.binance.vision/stream`.
