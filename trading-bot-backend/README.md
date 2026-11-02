@@ -8,7 +8,7 @@ Node.js/Express paper-trading service using MongoDB Atlas and Binance public Spo
 2. Copy `.env.example` to `.env` and set `MONGODB_URI` and a private `BOT_CONTROL_TOKEN`.
 3. Run `npm install`, `npm test`, and `npm start`.
 
-The service initializes one wallet with `INITIAL_BALANCE_USDT` (default 10,000 USDT), loads exactly 500 unique, contiguous, completed Binance candles for every configured symbol, and connects to Binance public trade and kline WebSockets. REST candles and order book depth use `BINANCE_REST_URL` (default `https://data-api.binance.vision`) with at least 150ms between requests. Binance HTTP 418 responses are not bypassed by rotating hosts; the service honors `Retry-After` or waits five minutes before retrying. The scanner calculates indicators only from those closed candles. If the feed cannot provide the required history, fresh trade ticks, or live L2 depth, the API reports an explicit data-feed error and new execution is frozen; no market data is generated locally.
+The service initializes one wallet with `INITIAL_BALANCE_USDT` (default 10,000 USDT), bootstraps exactly 500 unique, contiguous, completed Binance candles per symbol sequentially from `BINANCE_REST_URL` (default `https://data-api.binance.vision`) with a 500ms gap between symbols, then receives candle closes, trade ticks, and top-20 depth through one combined WebSocket (`BINANCE_WS_URL`, default `wss://data-stream.binance.vision/stream`). No REST depth polling occurs. If REST bootstrap returns HTTP 418, the service keeps the WebSocket active, honors `Retry-After` (or waits five minutes), and retries historical bootstrap while live candle history accumulates; new execution remains frozen until each symbol has exactly 500 contiguous closed candles, a fresh trade tick, and a fresh depth stream. REST requests are serialized with a minimum 150ms gap. The scanner calculates indicators only from verified closed candles; no market data is generated locally.
 
 Paper entries and exits use a fresh Binance Spot depth quote (best ask for buys, best bid for sells) with a 0.075% adverse execution adjustment per fill. Existing positions are monitored against real Binance kline highs/lows and remain open when a fresh execution quote is unavailable. This service is paper-only and does not send exchange orders.
 
@@ -21,7 +21,7 @@ Configure an external uptime monitor to request `GET /api/health/live`. This lig
 ## Trading defaults
 
 - Symbols: ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT, ADAUSDT, AVAXUSDT.
-- On each aligned completed candle close, the scanner checks all six symbols and allows only one open account position. Entries require at least 7 aligned votes from 10 real closed-candle indicators, current closed-candle volume greater than 1.5x the prior 20-candle average, and at least 60% matching top-50 Binance book pressure.
+- On each aligned completed candle close, the scanner checks all six symbols and allows only one open account position. Entries require at least 7 aligned votes from 10 real closed-candle indicators, current closed-candle volume greater than 1.5x the prior 20-candle average, and at least 60% matching top-20 Binance book pressure.
 - Stop distance is 1.5 ATR; take-profit defaults to a 2:1 reward/risk ratio.
 - Quantity is calculated directly as `(wallet balance * 0.02) / absolute(entry price - stop price)`. Entries are skipped if their required margin plus entry fee exceeds available margin. Leverage defaults to 1x.
 - Each fill includes a 0.075% taker fee as well as the existing adverse execution adjustment. Entry fees reduce available margin immediately; realized wallet P&L is gross P&L minus both entry and exit fees.
@@ -41,7 +41,7 @@ Configure an external uptime monitor to request `GET /api/health/live`. This lig
 | GET | `/api/market/status` | Verified live prices, 500 closed candles, L2 depth, and indicators; returns 503 when any symbol's real feed is unavailable |
 | GET | `/api/market/:symbol/candles` | Exactly 500 completed Binance candles |
 | GET | `/api/market/:symbol/indicators` | Indicators computed from completed Binance candles and live order book |
-| GET | `/api/market/:symbol/orderbook` | Top 50 levels from the Binance depth snapshot |
+| GET | `/api/market/:symbol/orderbook` | Top 20 levels from the Binance depth stream |
 | GET | `/api/market/prices` | Verified Binance prices; returns 503 when live market data is unavailable |
 | POST | `/api/bot/start` | Start scanning; Bearer token required |
 | POST | `/api/bot/stop` | Pause new entries while continuing to monitor/close open positions; Bearer token required |

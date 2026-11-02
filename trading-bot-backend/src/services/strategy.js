@@ -95,7 +95,7 @@ function analyzeCandles(candles, orderBook) {
     throw insufficientData();
   }
   if (!orderBook || !Array.isArray(orderBook.bids) || !Array.isArray(orderBook.asks)
-    || orderBook.bids.length < 50 || orderBook.asks.length < 50
+    || orderBook.bids.length < 20 || orderBook.asks.length < 20
     || !Number.isFinite(orderBook.bidQuantity) || !Number.isFinite(orderBook.askQuantity)) {
     const error = new Error('ORDERBOOK_DISCONNECTED');
     error.code = 'ORDERBOOK_DISCONNECTED';

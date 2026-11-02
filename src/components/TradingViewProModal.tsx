@@ -118,7 +118,7 @@ export function TradingViewProModal({
             {market && (
               <div className="mt-5 grid gap-4 md:grid-cols-2">
                 <div className="rounded-2xl border border-purple-500/15 p-4">
-                  <h3 className="mb-3 text-sm font-semibold text-white">Binance L2 · Top 50 levels</h3>
+                  <h3 className="mb-3 text-sm font-semibold text-white">Binance L2 · Top 20 levels</h3>
                   <div className="grid grid-cols-2 gap-3 text-xs font-mono">
                     <div className="text-emerald-300">
                       Best bid: {market.orderBook.bestBid.toFixed(coin.decimals)}
@@ -132,7 +132,7 @@ export function TradingViewProModal({
                     </div>
                   </div>
                   <p className="mt-3 text-[10px] text-slate-500">
-                    Binance depth snapshot received {new Date(market.orderBook.updatedAt).toLocaleTimeString()}.
+                    Binance depth stream update received {new Date(market.orderBook.updatedAt).toLocaleTimeString()}.
                   </p>
                 </div>
                 <div className="rounded-2xl border border-purple-500/15 p-4">

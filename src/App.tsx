@@ -717,7 +717,7 @@ function StrategyTab({
 
               <div className="rounded-2xl border border-purple-400/12 bg-purple-950/15 p-4">
                 <div className="mb-3 flex items-center justify-between">
-                  <h3 className="text-xs font-semibold text-white">Binance L2 · top 50</h3>
+                  <h3 className="text-xs font-semibold text-white">Binance L2 · top 20</h3>
                   <span className="text-[9px] text-slate-500">Snapshot {new Date(selectedMarket.orderBook.updatedAt).toLocaleTimeString()}</span>
                 </div>
                 <div className="flex justify-between text-[10px] font-mono">
@@ -845,7 +845,7 @@ function HealthTab({
       <section className="rounded-3xl border border-purple-400/15 bg-white/[0.025] p-5">
         <div className="mb-3 flex items-center justify-between">
           <h3 className="text-sm font-semibold text-white">Per-market feed health</h3>
-          <span className="text-[9px] font-mono text-slate-500">Fresh tick · 500 closed candles · L2 top 50</span>
+          <span className="text-[9px] font-mono text-slate-500">Fresh tick · 500 closed candles · L2 top 20</span>
         </div>
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
           {(snapshot?.markets ?? []).map((market) => (

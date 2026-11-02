@@ -167,11 +167,11 @@ export async function getBackendSnapshot(signal?: AbortSignal): Promise<BackendS
       status.symbols.includes(market.symbol)
       && Number.isFinite(market.price)
       && market.candleCount === 500
-      && market.orderBook?.levelCount === 50
+      && market.orderBook?.levelCount === 20
       && Array.isArray(market.orderBook.bids)
-      && market.orderBook.bids.length === 50
+      && market.orderBook.bids.length === 20
       && Array.isArray(market.orderBook.asks)
-      && market.orderBook.asks.length === 50)) {
+      && market.orderBook.asks.length === 20)) {
     throw new Error('DATA_FEED_OFFLINE: backend returned incomplete or invalid Binance market data');
   }
   return {

@@ -331,23 +331,18 @@ class PaperTradingEngine {
   }
 
   async refreshExecutionBook(symbol) {
-    try {
-      const orderBook = await this.feed.fetchOrderBook(symbol);
-      this.orderBooks.set(symbol, orderBook);
-      this.updateFeedState(symbol, { orderBookError: null });
-      return orderBook;
-    } catch (error) {
-      this.updateFeedState(symbol, { orderBookError: error.message || 'ORDERBOOK_DISCONNECTED' });
-      this.logger.error('Fresh Binance order book unavailable; paper execution is frozen', { symbol, error });
-      return null;
-    }
+    const orderBook = this.orderBooks.get(symbol);
+    if (this.isOrderBookFresh(orderBook)) return orderBook;
+    this.updateFeedState(symbol, { orderBookError: 'ORDERBOOK_DISCONNECTED: no fresh Binance depth stream data' });
+    this.logger.warn('Fresh Binance depth stream data unavailable; paper execution is frozen', { symbol });
+    return null;
   }
 
   isOrderBookFresh(orderBook) {
     return Boolean(orderBook
       && Date.now() - new Date(orderBook.updatedAt).getTime() <= MAX_MARKET_DATA_AGE_MS
-      && orderBook.bids.length >= 50
-      && orderBook.asks.length >= 50
+      && orderBook.bids.length >= 20
+      && orderBook.asks.length >= 20
       && Number.isFinite(orderBook.bestBid)
       && Number.isFinite(orderBook.bestAsk));
   }
