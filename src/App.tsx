@@ -495,9 +495,8 @@ function HomeTab({
     return (
       <section className="mx-auto flex min-h-[72vh] max-w-lg flex-col items-center justify-center py-10 text-center">
         <div className="relative mb-7 flex h-28 w-28 items-center justify-center">
-          <div className="absolute inset-0 rounded-full bg-purple-500/10 animate-ping" />
           <div className="absolute inset-2 rounded-full border border-purple-400/20" />
-          <div className="relative flex h-20 w-20 items-center justify-center rounded-full border border-purple-300/30 bg-gradient-to-br from-purple-500/20 to-pink-500/10 shadow-[0_0_40px_rgba(168,85,247,.2)]">
+          <div className="relative flex h-20 w-20 items-center justify-center rounded-full border border-purple-300/30 bg-gradient-to-br from-purple-500/20 to-pink-500/10 shadow-[0_0_40px_rgba(168,85,247,.2)] animate-heartbeat motion-reduce:animate-none">
             <svg viewBox="0 0 64 64" role="img" aria-label="Black cat mascot" className="h-12 w-12">
               <path
                 d="M23 39c-6 2-10 7-10 15l-3 7h20l2-7h4l2 7h20l-3-8c0-7-5-12-11-14Z"
