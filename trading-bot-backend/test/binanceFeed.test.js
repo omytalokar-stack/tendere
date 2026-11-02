@@ -208,10 +208,30 @@ test('combined WebSocket partial-depth messages update the order book', () => {
   assert.deepEqual(feedStates, [{ symbol, state: { orderBookError: null } }]);
 });
 
-test('418 stops all REST bootstrap requests while keeping WebSocket live', async () => {
+test('418 pauses REST bootstrap until the ban expires, then restores history while WebSocket stays live', async () => {
   const originalFetchCandles = BinanceFeed.prototype.fetchCandles;
   let requests = 0;
   const loggedMessages = [];
+  const intervalMs = {
+    '1m': 60_000, '3m': 180_000, '5m': 300_000, '15m': 900_000,
+    '30m': 1_800_000, '1h': 3_600_000, '2h': 7_200_000, '4h': 14_400_000,
+    '6h': 21_600_000, '8h': 28_800_000, '12h': 43_200_000, '1d': 86_400_000,
+  }[config.candleInterval];
+  const latestOpenTime = Math.floor(Date.now() / intervalMs) * intervalMs - intervalMs;
+  const history = Array.from({ length: BinanceFeed.REQUIRED_CANDLES }, (_, index) => {
+    const openTime = latestOpenTime - (BinanceFeed.REQUIRED_CANDLES - index - 1) * intervalMs;
+    return {
+      time: new Date(openTime),
+      openTime,
+      closeTime: openTime + intervalMs - 1,
+      open: 100,
+      high: 101,
+      low: 99,
+      close: 100,
+      volume: 2,
+      isFinal: true,
+    };
+  });
   const feed = createFeed({
     logger: {
       info() {},
@@ -219,28 +239,38 @@ test('418 stops all REST bootstrap requests while keeping WebSocket live', async
       error(message) { loggedMessages.push(message); },
     },
   });
+  feed.bootstrapDelay = 10;
+  feed.bootstrapSymbolDelayMs = 0;
   feed.connect = () => {
     feed.connected = true;
   };
   BinanceFeed.prototype.fetchCandles = async function fetchRejectedHistory() {
     requests += 1;
-    const error = new Error('DATA_FEED_OFFLINE: Binance historical request rejected');
-    error.code = 'DATA_FEED_OFFLINE';
-    error.status = 418;
-    error.retryAfterMs = 60_000;
-    throw error;
+    if (requests === 1) {
+      const error = new Error('DATA_FEED_OFFLINE: Binance historical request rejected');
+      error.code = 'DATA_FEED_OFFLINE';
+      error.status = 418;
+      error.retryAfterMs = 20;
+      throw error;
+    }
+    return history;
   };
 
   try {
     await feed.start();
-    assert.equal(requests, 1, 'stop bootstrap requests immediately on an IP-ban response');
+    assert.equal(requests, 1, 'do not make more REST requests during the IP ban');
     assert.equal(feed.connected, true);
     assert.equal(feed.initialized, false);
-    assert.equal(feed.bootstrapTimer, null);
+    assert.ok(feed.bootstrapTimer, 'schedule a retry for after the reported ban duration');
     assert.equal(feed.restIpBanned, true);
-    await feed.bootstrapHistory();
-    assert.equal(requests, 1, 'a banned feed must never retry historical REST requests');
-    assert.ok(loggedMessages.includes('REST IP banned; accumulating candles from live WebSocket stream.'));
+    assert.ok(loggedMessages.some((message) => message.includes('waiting for the ban to expire')));
+
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    assert.equal(requests, SYMBOLS.length + 1);
+    assert.equal(feed.restIpBanned, false);
+    assert.equal(feed.initialized, true);
+    assert.equal(feed.bootstrapTimer, null);
+    assert.ok(SYMBOLS.every((symbol) => feed.data.get(symbol).candles.length === 500));
 
     const symbol = SYMBOLS[0];
     feed.handleMessage(Buffer.from(JSON.stringify({

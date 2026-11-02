@@ -144,8 +144,10 @@ class BinanceFeed {
     this.reconnectTimer = null;
     this.bootstrapTimer = null;
     this.restIpBanned = false;
+    this.restBanRetryAfterMs = 0;
     this.reconnectDelay = 1_000;
     this.bootstrapDelay = 5_000;
+    this.bootstrapSymbolDelayMs = BOOTSTRAP_SYMBOL_DELAY_MS;
     this.stopped = true;
     this.initialized = false;
     this.syncing = false;
@@ -255,18 +257,22 @@ class BinanceFeed {
           this.logger.error('Binance historical candle bootstrap failed', { symbol, error });
           if (error.isIpBan || error.status === 418) {
             this.restIpBanned = true;
-            this.logger.error('REST IP banned; accumulating candles from live WebSocket stream.');
+            this.restBanRetryAfterMs = Math.max(
+              this.restBanRetryAfterMs,
+              error.retryAfterMs || DEFAULT_BAN_COOLDOWN_MS,
+            );
+            this.logger.warn('Binance REST IP ban detected; keeping WebSocket data live and waiting for the ban to expire.');
             break;
           }
         }
 
-        if (index < SYMBOLS.length - 1) await wait(BOOTSTRAP_SYMBOL_DELAY_MS);
+        if (index < SYMBOLS.length - 1) await wait(this.bootstrapSymbolDelayMs);
       }
 
       this.initialized = SYMBOLS.every((symbol) =>
         this.getHistoryError(symbol, this.data.get(symbol).candles) === null);
       if (this.restIpBanned) {
-        this.bootstrapTimer = null;
+        this.scheduleBootstrapRetry({ retryAfterMs: this.restBanRetryAfterMs }, { afterIpBan: true });
       } else if (!this.initialized) {
         this.scheduleBootstrapRetry();
       } else {
@@ -434,12 +440,18 @@ class BinanceFeed {
     this.logger.warn(`Binance WebSocket disconnected; reconnecting in ${delay}ms`);
   }
 
-  scheduleBootstrapRetry(error) {
-    if (this.stopped || this.restIpBanned || this.bootstrapTimer) return;
-    const delay = Math.max(this.bootstrapDelay, error?.retryAfterMs || 0);
+  scheduleBootstrapRetry(error, { afterIpBan = false } = {}) {
+    if (this.stopped || (this.restIpBanned && !afterIpBan) || this.bootstrapTimer) return;
+    const delay = afterIpBan
+      ? Math.max(this.bootstrapDelay, error?.retryAfterMs || DEFAULT_BAN_COOLDOWN_MS) + 1_000
+      : Math.max(this.bootstrapDelay, error?.retryAfterMs || 0);
     this.bootstrapDelay = Math.min(this.bootstrapDelay * 2, 30 * 60_000);
     this.bootstrapTimer = setTimeout(() => {
       this.bootstrapTimer = null;
+      if (afterIpBan) {
+        this.restIpBanned = false;
+        this.restBanRetryAfterMs = 0;
+      }
       this.bootstrapHistory().catch((bootstrapError) =>
         this.logger.error('Binance candle bootstrap retry failed', bootstrapError));
     }, delay);

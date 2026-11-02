@@ -295,6 +295,9 @@ test('stop-loss cooldown lasts exactly three configured candle intervals', () =>
 
 test('market APIs fail with an explicit 503 while real feed data is unavailable', async () => {
   const engine = new PaperTradingEngine({ logger: { info() {}, warn() {}, error() {} } });
+  const originalConsoleError = console.error;
+  let errorLogCount = 0;
+  console.error = () => { errorLogCount += 1; };
   const server = createApp(engine).listen(0);
   await new Promise((resolve) => server.once('listening', resolve));
   const { port } = server.address();
@@ -306,6 +309,7 @@ test('market APIs fail with an explicit 503 while real feed data is unavailable'
     ]);
     assert.equal(statusResponse.status, 503);
     assert.match((await statusResponse.json()).error, /^DATA_FEED_OFFLINE:/);
+    assert.equal(errorLogCount, 0, 'expected unavailable market data should not log a server stack on every poll');
     assert.equal(candleResponse.status, 503);
     assert.match((await candleResponse.json()).error, /^DATA_FEED_OFFLINE:/);
     assert.equal(auditResponse.status, 200);
@@ -317,5 +321,6 @@ test('market APIs fail with an explicit 503 while real feed data is unavailable'
     assert.ok(Number.isFinite(Date.parse(livePayload.timestamp)));
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    console.error = originalConsoleError;
   }
 });

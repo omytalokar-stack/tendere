@@ -77,7 +77,7 @@ Render (Node.js/Express)
 - REST host default: `https://data-api.binance.vision`; trading API hosts are rejected by config.
 - WebSocket default: `wss://data-stream.binance.vision/stream`.
 - Startup downloads 500 unique, contiguous, completed candles for each symbol, sequentially with a delay between symbols.
-- A `418`/IP ban stops further REST bootstrap requests for the process; the backend keeps the WebSocket running and reports unavailable markets until verified history is available.
+- A `418`/IP ban pauses REST bootstrap requests until the supplied expiry/`Retry-After` duration passes; the backend keeps the WebSocket running and retries missing histories with backoff. It reports unavailable markets and blocks paper entries until verified history is available.
 - The combined socket receives finalized/in-progress klines, trade events, and Binance partial-depth snapshots.
 - Binance's `depth20` payload does not use the same event shape as a diff-depth `depthUpdate`. The parser uses the combined-stream name and the `bids`/`asks` arrays. Regression test: `combined WebSocket partial-depth messages update the order book`.
 - Market data is not generated with random/demo prices. The frontend clears its snapshot and displays the error if required data is invalid/unavailable.

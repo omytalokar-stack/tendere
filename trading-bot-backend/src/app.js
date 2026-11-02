@@ -159,12 +159,12 @@ function createApp(engine) {
   });
 
   app.use((error, req, res, next) => {
-    if ((error.status || error.statusCode || 500) >= 500) console.error('Request failed', error);
     if (res.headersSent) return next(error);
     const isExplicitDataError = /^(DATA_FEED_OFFLINE|INSUFFICIENT_HISTORICAL_DATA|ORDERBOOK_DISCONNECTED)/.test(error.message || '');
     const status = error.status
       || error.statusCode
       || (isExplicitDataError ? 503 : 500);
+    if (status >= 500 && !isExplicitDataError) console.error('Request failed', error);
     const message = status >= 500 && !error.code && !isExplicitDataError ? 'Internal server error' : error.message;
     return res.status(status).json({ error: message });
   });
