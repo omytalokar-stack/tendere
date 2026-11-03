@@ -6,8 +6,76 @@ const PaperTrade = require('./models/PaperTrade');
 const VirtualWallet = require('./models/VirtualWallet');
 const { config, SYMBOLS } = require('./config');
 const controlAuth = require('./middleware/controlAuth');
+const agentReadAuth = require('./middleware/agentReadAuth');
+const createAgentReadRateLimit = require('./middleware/agentReadRateLimit');
+const { generateAssistantResponse } = require('./services/assistantProvider');
 
-function createApp(engine) {
+async function getAgentSnapshot(engine) {
+  const [bot, wallet, trades] = await Promise.all([
+    engine.status(),
+    VirtualWallet.findById('primary').lean(),
+    PaperTrade.find({})
+      .select('_id symbol side status entryPrice exitPrice quantity margin leverage stopLoss takeProfit pnlUsd pnlPercent closeReason openedAt closedAt')
+      .sort({ openedAt: -1 })
+      .limit(50)
+      .lean(),
+  ]);
+  if (!wallet) return null;
+
+  const markets = SYMBOLS.map((symbol) => {
+    const market = engine.getMarketSnapshot(symbol);
+    return {
+      symbol,
+      price: Number.isFinite(market.price) ? market.price : null,
+      ready: Boolean(market.ready),
+    };
+  });
+  const sanitizedWallet = {
+    balance: wallet.balance,
+    availableMargin: wallet.availableMargin,
+    inTradeMargin: wallet.inTradeMargin,
+    totalRealizedPnl: wallet.totalRealizedPnl,
+    winCount: wallet.winCount,
+    lossCount: wallet.lossCount,
+  };
+  const sanitizedTrades = trades.map((trade) => ({
+    id: String(trade._id),
+    symbol: trade.symbol,
+    side: trade.side,
+    status: trade.status,
+    entryPrice: trade.entryPrice,
+    exitPrice: trade.exitPrice,
+    quantity: trade.quantity,
+    margin: trade.margin,
+    leverage: trade.leverage,
+    stopLoss: trade.stopLoss,
+    takeProfit: trade.takeProfit,
+    pnlUsd: trade.pnlUsd,
+    pnlPercent: trade.pnlPercent,
+    closeReason: trade.closeReason,
+    openedAt: trade.openedAt,
+    closedAt: trade.closedAt,
+  }));
+  const sanitizedBot = {
+    running: Boolean(bot.running),
+    enabled: Boolean(bot.enabled),
+    feedConnected: Boolean(bot.feedConnected),
+    marketDataReady: Boolean(bot.marketDataReady),
+    interval: bot.interval,
+    entryIntervals: bot.entryIntervals,
+    symbols: SYMBOLS,
+    prices: Object.fromEntries(markets.map((market) => [market.symbol, market.price])),
+  };
+
+  return {
+    bot: sanitizedBot,
+    wallet: sanitizedWallet,
+    trades: sanitizedTrades,
+    markets,
+  };
+}
+
+function createApp(engine, { assistantGenerator = generateAssistantResponse } = {}) {
   const app = express();
   app.disable('x-powered-by');
   app.use(cors({
@@ -23,7 +91,55 @@ function createApp(engine) {
     },
   }));
   app.use(express.json({ limit: '16kb' }));
+  app.use((error, req, res, next) => {
+    if (error.type === 'entity.too.large') {
+      return res.status(413).json({ error: 'Request body is too large' });
+    }
+    if (error instanceof SyntaxError && error.status === 400 && Object.hasOwn(error, 'body')) {
+      return res.status(400).json({ error: 'Invalid JSON request body' });
+    }
+    return next(error);
+  });
 
+  const agentReadRateLimit = createAgentReadRateLimit();
+
+  app.get('/', (req, res) => res.json({
+    status: 'ok',
+    service: 'AuraAlgo Crypto Paper Trading',
+  }));
+  app.post('/assistant/query', agentReadAuth, agentReadRateLimit, async (req, res) => {
+    const query = req.body?.query;
+    if (typeof query !== 'string' || !query.trim() || query.length > 1000) {
+      return res.status(400).json({ error: 'query must be a non-empty string of at most 1000 characters' });
+    }
+    if (!config.geminiApiKey) {
+      return res.status(503).json({
+        error: 'Gemini AI is not configured',
+        code: 'AI_PROVIDER_NOT_CONFIGURED',
+        missingConfiguration: 'GEMINI_API_KEY',
+      });
+    }
+    const snapshot = await getAgentSnapshot(engine);
+    if (!snapshot) return res.status(503).json({ error: 'Wallet is not initialized' });
+
+    try {
+      const response = await assistantGenerator(query.trim(), snapshot);
+      if (typeof response !== 'string' || !response.trim()) {
+        return res.status(502).json({ error: 'Assistant provider returned an invalid response' });
+      }
+      return res.json({ response: response.trim().slice(0, 2000) });
+    } catch (error) {
+      if (error?.code === 'AI_PROVIDER_NOT_CONFIGURED') {
+        return res.status(503).json({
+          error: 'Gemini AI is not configured',
+          code: 'AI_PROVIDER_NOT_CONFIGURED',
+          missingConfiguration: 'GEMINI_API_KEY',
+        });
+      }
+      console.error('Assistant provider request failed');
+      return res.status(502).json({ error: 'Assistant provider request failed' });
+    }
+  });
   app.get('/api/health/live', (req, res) => res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
@@ -38,6 +154,17 @@ function createApp(engine) {
   });
   app.get('/api/bot/status', async (req, res) => res.json(await engine.status()));
   app.get('/api/bot/audit', (req, res) => res.json({ events: engine.getAuditLog() }));
+  app.get('/api/agent/context', agentReadAuth, agentReadRateLimit, async (req, res) => {
+    const snapshot = await getAgentSnapshot(engine);
+    if (!snapshot) return res.status(503).json({ error: 'Wallet is not initialized' });
+    return res.json({
+      webappName: 'AuraAlgo Crypto Paper Trading',
+      apiBasePath: '/api/agent/context',
+      pollingIntervalSeconds: config.agentPollingIntervalSeconds,
+      generatedAt: new Date().toISOString(),
+      ...snapshot,
+    });
+  });
   app.get('/api/market/status', (req, res, next) => {
     try {
       return res.json({

@@ -46,11 +46,59 @@ Configure an external uptime monitor to request `GET /api/health/live`. This lig
 | GET | `/api/market/:symbol/indicators` | Indicators computed from completed Binance candles and live order book |
 | GET | `/api/market/:symbol/orderbook` | Top 20 levels from the Binance depth stream |
 | GET | `/api/market/prices` | Verified Binance prices; returns 503 when live market data is unavailable |
+| GET | `/api/agent/context` | Authenticated, sanitized read-only snapshot: bot/feed status, wallet, recent trades, and market prices |
+| GET | `/` | Small public service health response (also used by Haki connection test) |
+| POST | `/assistant/query` | Authenticated Gemini voice query; returns `{ "response": "..." }` |
 | POST | `/api/bot/start` | Start scanning; Bearer token required |
 | POST | `/api/bot/stop` | Pause new entries while continuing to monitor/close open positions; Bearer token required |
 | POST | `/api/trades/:id/close` | Close an open paper trade at latest price; Bearer token required |
 
 Set `BOT_CONTROL_TOKEN` on the backend and send `Authorization: Bearer <token>` for every control request. Keep this token on a trusted server; never embed it in browser-delivered Vercel code. Configure `ALLOWED_ORIGINS` as a comma-separated list. `*.vercel.app` and local development origins are also allowed.
+
+### AI agent read API
+
+The read-only agent endpoint returns a sanitized snapshot and does not grant bot-control permissions. Set a unique, long random `AI_READ_API_TOKEN` on the backend; do not reuse `BOT_CONTROL_TOKEN` or expose either token in browser code. Configure `AI_READ_POLL_INTERVAL_SECONDS` if needed (default 15; allowed range 5–3600). Authenticated agent requests share an in-memory limit of 60 requests per minute per backend process.
+
+Generate a token with `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"` and set the result as `AI_READ_API_TOKEN` in the backend's private environment. Give the same value only to the trusted AI integration.
+
+Give your agent this connection configuration:
+
+```text
+Webapp name: AuraAlgo Crypto Paper Trading
+API base URL: https://<your-backend-host>/api/agent
+API auth: Bearer <the AI_READ_API_TOKEN you configured privately>
+Context endpoint: GET {API base URL}/context
+Status polling interval: 15 seconds (or your configured AI_READ_POLL_INTERVAL_SECONDS)
+```
+
+Send the token in the `Authorization` header. The endpoint returns one JSON snapshot containing selected bot/feed status, paper-wallet balances and P&L, up to 50 selected fields from recent paper trades, and each configured market's price/readiness. It omits audit logs, diagnostics, and unapproved database fields. It is read-only and returns `401` for a missing/invalid token, `429` when rate-limited, or `503` if its service credential is not configured. Do not put the token in a URL or prompt that may be logged. Example:
+
+```http
+GET /api/agent/context HTTP/1.1
+Host: <your-backend-host>
+Authorization: Bearer <AI_READ_API_TOKEN>
+Accept: application/json
+```
+
+### Haki Android voice assistant
+
+Configure Haki with the Render backend's HTTPS origin as its base URL (do not add a path):
+
+```text
+BASE URL: https://<your-render-service>.onrender.com
+Auth: Bearer key required
+Key: the backend AI_READ_API_TOKEN value, stored in Haki's secure credential setting
+Connection test: GET {BASE URL}/
+Voice request: POST {BASE URL}/assistant/query
+Content-Type: application/json
+Body: {"query":"recognized speech"}
+```
+
+The same private `AI_READ_API_TOKEN` protects the read-only context and voice-query routes. Generate/configure it only in the backend host's private environment and Haki's secure credential storage; never place it in a URL or client source code. The GET root health check does not require the key. The query accepts a non-empty `query` up to 1,000 characters, and the JSON request body is capped at 16 KB; requests are rate-limited. The backend uses the existing Google Gen AI SDK and requires `GEMINI_API_KEY` in the backend host's private environment. It returns HTTP 503 with `missingConfiguration: "GEMINI_API_KEY"` until configured; provider failures return a generic HTTP 502 without logging provider error details. A sanitized trading snapshot and the recognized query are sent to Gemini to generate the spoken answer; the response is limited to 2,000 characters. The system prompt requires an answer in the query's language (Hindi/Marathi/English including transliteration) and prohibits trading/funds/settings actions.
+
+Create a Gemini API key in Google AI Studio and add it as `GEMINI_API_KEY` only in the Render backend service's private Environment settings. The Haki Bearer key is a separate `AI_READ_API_TOKEN`; do not use the Gemini key in Haki.
+
+The current backend stores one primary paper wallet and account-wide trades; it has no user/tenant identifiers or login-based tenant isolation. The agent token grants read access only to that single app account. Do not use this API for a multi-tenant deployment without adding an appropriate account authorization model.
 
 ## Render deployment
 

@@ -33,6 +33,9 @@ const config = {
   port: numberFromEnv('PORT', 3001, { min: 1, max: 65535 }),
   mongoUri: process.env.MONGODB_URI,
   controlToken: process.env.BOT_CONTROL_TOKEN,
+  agentReadToken: process.env.AI_READ_API_TOKEN,
+  geminiApiKey: process.env.GEMINI_API_KEY,
+  agentPollingIntervalSeconds: numberFromEnv('AI_READ_POLL_INTERVAL_SECONDS', 15, { min: 5, max: 3600 }),
   allowedOrigins: (process.env.ALLOWED_ORIGINS || '')
     .split(',')
     .map((origin) => origin.trim())
