@@ -59,6 +59,7 @@ class PaperTradingEngine {
     this.pendingExits = new Map();
     this.closingTrades = new Set();
     this.dailyLossAlertDate = null;
+    this.dailyConsecutiveLossAlertDate = null;
     this.auditLog = [];
     this.feedStates = new Map(SYMBOLS.map((symbol) => [symbol, {
       error: `DATA_FEED_OFFLINE: Binance real feed failed for ${symbol}: awaiting initial synchronization`,
@@ -155,6 +156,7 @@ class PaperTradingEngine {
       rewardRiskRatio: config.rewardRiskRatio,
       leverage: config.leverage,
       dailyLossLimit: config.dailyLossLimit,
+      dailyConsecutiveLossLimit: config.dailyConsecutiveLossLimit,
     });
     this.recordAudit('ENGINE', null, 'Paper trading engine started');
   }
@@ -196,7 +198,10 @@ class PaperTradingEngine {
 
       const openTrade = await PaperTrade.findOne({ symbol, status: 'OPEN' });
       if (interval === config.candleInterval && openTrade && candle.isFinal !== true) {
-        const exit = this.getExit(openTrade, candle);
+        let exit = this.getExit(openTrade, candle);
+        if (!exit && await this.moveStopToBreakeven(openTrade, candle)) {
+          exit = this.getExit(openTrade, candle);
+        }
         if (exit) {
           this.pendingExits.set(symbol, exit.reason);
           const closed = await this.closeAtMarket(openTrade, exit.reason);
@@ -254,8 +259,11 @@ class PaperTradingEngine {
     const openTrade = await PaperTrade.findOne({ symbol, status: 'OPEN' });
     if (openTrade) {
       if (interval === config.candleInterval) {
-        const exit = this.getExit(openTrade, candle)
-          || await this.getMomentumReversal(openTrade, history);
+        let exit = this.getExit(openTrade, candle);
+        if (!exit && await this.moveStopToBreakeven(openTrade, candle)) {
+          exit = this.getExit(openTrade, candle);
+        }
+        if (!exit) exit = await this.getMomentumReversal(openTrade, history);
         if (exit) {
           this.pendingExits.set(symbol, exit.reason);
           const closed = await this.closeAtMarket(openTrade, exit.reason);
@@ -295,6 +303,10 @@ class PaperTradingEngine {
     if (await this.dailyLossLimitReached()) {
       this.logger.warn('Daily loss limit reached; new paper positions are paused');
       this.sendDailyLossAlertOnce();
+      return;
+    }
+    if (await this.dailyConsecutiveLossLimitReached()) {
+      this.recordDailyConsecutiveLossPause();
       return;
     }
 
@@ -344,6 +356,7 @@ class PaperTradingEngine {
         side: direction,
         entryPrice,
         entryQuote: rawEntryQuote,
+        initialStopLoss: stopLoss,
         executionCostUsd: round(Math.abs(entryPrice - rawEntryQuote) * position.quantity, 8),
         entryFeeUsd,
         exitFeeUsd: 0,
@@ -395,6 +408,38 @@ class PaperTradingEngine {
     this.updateFeedState(symbol, { orderBookError: 'ORDERBOOK_DISCONNECTED: no fresh Binance depth stream data' });
     this.logger.warn('Fresh Binance depth stream data unavailable; paper execution is frozen', { symbol });
     return null;
+  }
+
+  async moveStopToBreakeven(trade, candle) {
+    const initialStopLoss = Number.isFinite(trade.initialStopLoss)
+      ? trade.initialStopLoss
+      : trade.stopLoss;
+    const riskDistance = trade.side === 'LONG'
+      ? trade.entryPrice - initialStopLoss
+      : initialStopLoss - trade.entryPrice;
+    if (!Number.isFinite(riskDistance) || riskDistance <= 0) return false;
+
+    const breakevenAlreadySet = trade.side === 'LONG'
+      ? trade.stopLoss >= trade.entryPrice
+      : trade.stopLoss <= trade.entryPrice;
+    if (breakevenAlreadySet) return false;
+
+    const reachedOneR = trade.side === 'LONG'
+      ? candle.high >= trade.entryPrice + riskDistance
+      : candle.low <= trade.entryPrice - riskDistance;
+    if (!reachedOneR) return false;
+
+    const previousStopLoss = trade.stopLoss;
+    const result = await PaperTrade.updateOne(
+      { _id: trade._id, status: 'OPEN', stopLoss: previousStopLoss },
+      { $set: { stopLoss: trade.entryPrice, initialStopLoss } },
+    );
+    if (result.matchedCount !== 1) return false;
+
+    trade.initialStopLoss = initialStopLoss;
+    trade.stopLoss = trade.entryPrice;
+    this.recordAudit('TRADE', trade.symbol, 'Moved paper stop-loss to breakeven after +1R');
+    return true;
   }
 
   isOrderBookFresh(orderBook) {
@@ -507,6 +552,37 @@ class PaperTradingEngine {
       { $group: { _id: null, loss: { $sum: '$pnlUsd' } } },
     ]);
     return Math.abs(result[0]?.loss || 0) >= config.dailyLossLimit;
+  }
+
+  async dailyConsecutiveLossLimitReached() {
+    const utcDayStart = new Date();
+    utcDayStart.setUTCHours(0, 0, 0, 0);
+    const trades = await PaperTrade.find({
+      status: 'CLOSED',
+      closedAt: { $gte: utcDayStart },
+    })
+      .select('pnlUsd')
+      .sort({ closedAt: 1 })
+      .lean();
+
+    let consecutiveLosses = 0;
+    for (const trade of trades) {
+      consecutiveLosses = trade.pnlUsd < 0 ? consecutiveLosses + 1 : 0;
+      if (consecutiveLosses >= config.dailyConsecutiveLossLimit) return true;
+    }
+    return false;
+  }
+
+  recordDailyConsecutiveLossPause() {
+    const today = new Date().toISOString().slice(0, 10);
+    if (this.dailyConsecutiveLossAlertDate === today) return;
+    this.dailyConsecutiveLossAlertDate = today;
+    this.logger.warn('Daily consecutive-loss limit reached; new paper positions are paused');
+    this.recordAudit(
+      'ENGINE',
+      null,
+      `New entries paused after ${config.dailyConsecutiveLossLimit} consecutive losing trades today (UTC)`,
+    );
   }
 
   sendDailyLossAlertOnce() {
@@ -703,6 +779,7 @@ class PaperTradingEngine {
       rewardRiskRatio: config.rewardRiskRatio,
       leverage: config.leverage,
       dailyLossLimit: config.dailyLossLimit,
+      dailyConsecutiveLossLimit: config.dailyConsecutiveLossLimit,
       lastProcessed: Object.fromEntries(this.lastProcessedCandle),
       marketDataReady: this.allMarketDataReady(),
       marketErrors: Object.fromEntries(SYMBOLS.map((symbol) => [symbol, {

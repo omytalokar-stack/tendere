@@ -41,6 +41,44 @@ test('a closed candle crossing a stop-loss returns no assumed fill price', () =>
   assert.deepEqual(exit, { reason: 'STOP_LOSS' });
 });
 
+test('a favorable one-R move persists a breakeven stop for long and short positions', async () => {
+  const originalUpdateOne = PaperTrade.updateOne;
+  const updates = [];
+  PaperTrade.updateOne = async (filter, update) => {
+    updates.push({ filter, update });
+    return { matchedCount: 1 };
+  };
+  try {
+    const engine = new PaperTradingEngine({ logger: { info() {}, warn() {}, error() {} } });
+    const long = {
+      _id: 'long-trade',
+      symbol: 'ETHUSDT',
+      side: 'LONG',
+      entryPrice: 100,
+      stopLoss: 90,
+      initialStopLoss: 90,
+    };
+    assert.equal(await engine.moveStopToBreakeven(long, { high: 109, low: 99 }), false);
+    assert.equal(await engine.moveStopToBreakeven(long, { high: 110, low: 99 }), true);
+    assert.equal(long.stopLoss, 100);
+    assert.deepEqual(updates[0].update, { $set: { stopLoss: 100, initialStopLoss: 90 } });
+
+    const short = {
+      _id: 'short-trade',
+      symbol: 'SOLUSDT',
+      side: 'SHORT',
+      entryPrice: 100,
+      stopLoss: 110,
+      initialStopLoss: 110,
+    };
+    assert.equal(await engine.moveStopToBreakeven(short, { high: 101, low: 90 }), true);
+    assert.equal(short.stopLoss, 100);
+    assert.equal(updates[1].filter.stopLoss, 110);
+  } finally {
+    PaperTrade.updateOne = originalUpdateOne;
+  }
+});
+
 test('fresh Binance depth keeps a quiet market ready and supplies a labeled midpoint quote', () => {
   const engine = new PaperTradingEngine({ logger: { info() {}, warn() {}, error() {} } });
   const candlesByInterval = new Map(config.entryIntervals.map((interval) => {
@@ -296,6 +334,74 @@ test('stop-loss cooldown lasts exactly three configured candle intervals', () =>
   const intervalMs = INTERVAL_MS[config.candleInterval];
   assert.equal(cooldownUntil.getTime() - closedAt.getTime(), intervalMs * 3);
   if (config.candleInterval === '15m') assert.equal(intervalMs * 3, 45 * 60_000);
+});
+
+test('daily consecutive-loss breaker counts only the latest closed losses in UTC day', async () => {
+  const originalFind = PaperTrade.find;
+  let query;
+  let requestedSort;
+  let rows = [{ pnlUsd: -2 }, { pnlUsd: -1 }];
+  PaperTrade.find = (filter) => {
+    query = filter;
+    return {
+      select: () => ({
+        sort: (sort) => {
+          requestedSort = sort;
+          return { lean: async () => rows };
+        },
+      }),
+    };
+  };
+  try {
+    const engine = new PaperTradingEngine({ logger: { info() {}, warn() {}, error() {} } });
+    assert.equal(await engine.dailyConsecutiveLossLimitReached(), true);
+    assert.equal(query.status, 'CLOSED');
+    assert.equal(new Date(query.closedAt.$gte).toISOString().slice(11), '00:00:00.000Z');
+    assert.deepEqual(requestedSort, { closedAt: 1 });
+
+    rows = [{ pnlUsd: -2 }, { pnlUsd: -1 }, { pnlUsd: 0.5 }];
+    assert.equal(await engine.dailyConsecutiveLossLimitReached(), true, 'the circuit breaker remains latched after it is reached');
+    rows = [{ pnlUsd: -2 }, { pnlUsd: 0.5 }, { pnlUsd: -1 }];
+    assert.equal(await engine.dailyConsecutiveLossLimitReached(), false);
+    rows = [{ pnlUsd: -2 }];
+    assert.equal(await engine.dailyConsecutiveLossLimitReached(), false);
+  } finally {
+    PaperTrade.find = originalFind;
+  }
+});
+
+test('daily consecutive-loss breaker stops the scanner from opening new trades', async () => {
+  const originalExists = PaperTrade.exists;
+  PaperTrade.exists = async () => false;
+  try {
+    const engine = new PaperTradingEngine({ logger: { info() {}, warn() {}, error() {} } });
+    const interval = '15m';
+    const intervalMs = INTERVAL_MS[interval];
+    const candleOpenTime = Math.floor(Date.now() / intervalMs) * intervalMs - intervalMs;
+    for (const symbol of SYMBOLS) {
+      engine.candleHistories.get(interval).set(symbol, Array.from({ length: 500 }, (_, index) => {
+        const openTime = candleOpenTime - (499 - index) * intervalMs;
+        return {
+          time: new Date(openTime),
+          openTime,
+          closeTime: openTime + intervalMs - 1,
+          open: 100,
+          high: 101,
+          low: 99,
+          close: 100,
+          volume: 10,
+          isFinal: true,
+        };
+      }));
+    }
+    engine.dailyLossLimitReached = async () => false;
+    engine.dailyConsecutiveLossLimitReached = async () => true;
+
+    await engine.scanMarketsForEntry(candleOpenTime, interval);
+    assert.match(engine.getAuditLog()[0].message, /consecutive losing trades today/);
+  } finally {
+    PaperTrade.exists = originalExists;
+  }
 });
 
 test('market APIs fail with an explicit 503 while real feed data is unavailable', async () => {

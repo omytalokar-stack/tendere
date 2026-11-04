@@ -17,30 +17,30 @@ test('analysis refuses to calculate from fewer than 250 finalized candles', () =
   );
 });
 
-test('position sizing uses exactly two percent of wallet balance at the stop', () => {
+test('position sizing uses exactly one percent of wallet balance at the stop', () => {
   const size = sizePosition({
     balance: 10_000,
     entryPrice: 100,
     stopLoss: 95,
     leverage: 1,
   });
-  assert.equal(RISK_PERCENT, 2);
-  assert.equal(size.riskBudgetUsd, 200);
-  assert.equal(size.quantity, 40);
-  assert.equal(size.margin, 4_000);
-  assert.equal(size.maxRiskUsd, 200);
+  assert.equal(RISK_PERCENT, 1);
+  assert.equal(size.riskBudgetUsd, 100);
+  assert.equal(size.quantity, 20);
+  assert.equal(size.margin, 2_000);
+  assert.equal(size.maxRiskUsd, 100);
 });
 
-test('leverage changes required margin without changing the strict risk amount', () => {
+test('leverage changes required margin without changing the one-percent risk amount', () => {
   const size = sizePosition({
     balance: 10_000,
     entryPrice: 100,
     stopLoss: 99,
     leverage: 5,
   });
-  assert.equal(size.quantity, 200);
-  assert.equal(size.margin, 4_000);
-  assert.equal(size.maxRiskUsd, 200);
+  assert.equal(size.quantity, 100);
+  assert.equal(size.margin, 2_000);
+  assert.equal(size.maxRiskUsd, 100);
 });
 
 test('position sizing rejects zero-distance stop losses', () => {
@@ -61,46 +61,46 @@ test('position sizing rejects non-positive stop prices', () => {
   }), /Invalid inputs/);
 });
 
-test('entry requires seven aligned votes, volume above 1.5x, and 60% aligned book pressure', () => {
+test('entry requires five aligned votes, volume at least 1.2x, and 54% aligned book pressure', () => {
   const analysis = {
-    buyVotes: 7,
-    sellVotes: 2,
-    volumeRatio: 1.51,
-    orderBookPressure: { bidPercent: 60, askPercent: 40 },
+    buyVotes: 5,
+    sellVotes: 4,
+    volumeRatio: 1.2,
+    orderBookPressure: { bidPercent: 54, askPercent: 46 },
   };
   assert.equal(getEntrySignal(analysis), 'LONG');
   assert.equal(getEntrySignal({
     ...analysis,
-    orderBookPressure: { bidPercent: 40, askPercent: 60 },
+    orderBookPressure: { bidPercent: 53.99, askPercent: 46.01 },
   }), null);
   assert.equal(getEntrySignal({
     ...analysis,
-    volumeRatio: 1.5,
-    orderBookPressure: { bidPercent: 61, askPercent: 39 },
+    volumeRatio: 1.199999,
+    orderBookPressure: { bidPercent: 55, askPercent: 45 },
   }), null);
   assert.equal(getEntrySignal({
-    buyVotes: 2,
-    sellVotes: 7,
-    volumeRatio: 1.6,
-    orderBookPressure: { bidPercent: 39, askPercent: 61 },
+    buyVotes: 4,
+    sellVotes: 5,
+    volumeRatio: 1.2,
+    orderBookPressure: { bidPercent: 46, askPercent: 54 },
   }), 'SHORT');
 });
 
 test('five-minute entries require the fifteen-minute signal to confirm the same direction', () => {
   const long = {
-    buyVotes: 7,
-    sellVotes: 2,
-    volumeRatio: 1.51,
-    orderBookPressure: { bidPercent: 60, askPercent: 40 },
+    buyVotes: 5,
+    sellVotes: 4,
+    volumeRatio: 1.2,
+    orderBookPressure: { bidPercent: 54, askPercent: 46 },
   };
   const short = {
-    buyVotes: 2,
-    sellVotes: 7,
-    volumeRatio: 1.51,
-    orderBookPressure: { bidPercent: 40, askPercent: 60 },
+    buyVotes: 4,
+    sellVotes: 5,
+    volumeRatio: 1.2,
+    orderBookPressure: { bidPercent: 46, askPercent: 54 },
   };
   assert.equal(getConfirmedEntrySignal(long, long), 'LONG');
   assert.equal(getConfirmedEntrySignal(long, short), null);
-  assert.equal(getConfirmedEntrySignal(long, { ...long, volumeRatio: 1.5 }), null);
-  assert.equal(getConfirmedEntrySignal({ ...short, volumeRatio: 1.5 }, short), null);
+  assert.equal(getConfirmedEntrySignal(long, { ...long, volumeRatio: 1.19 }), null);
+  assert.equal(getConfirmedEntrySignal({ ...short, volumeRatio: 1.19 }, short), null);
 });

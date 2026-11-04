@@ -118,19 +118,20 @@ A new entry is considered only when:
 - The daily realized-loss limit has not been reached.
 - The symbol is not in its post-loss cooldown.
 - Fresh Binance order-book data is available.
-- At least 7 of the 10 votes align for the same direction.
-- Current closed-candle volume is strictly greater than 1.5 times the previous 20-candle mean.
-- Matching side of top-20 order-book quantity is at least 60%.
+- At least 5 directional votes align for the same direction.
+- Current closed-candle volume is at least 1.2 times the previous 20-candle mean.
+- Matching side of top-20 order-book quantity is at least 54%.
 
 The current vote display can show a majority without an entry signal: all gates must pass. If no qualifying setup occurs, the expected behavior is to hold cash.
 
 ### Position size and simulated fills
 
-- Default planned risk budget: 2% of current virtual wallet balance per trade.
-- Quantity formula: `(wallet balance * 0.02) / abs(entry price - stop price)`.
+- Default planned risk budget: 1% of current virtual wallet balance per trade.
+- Quantity formula: `(wallet balance * 0.01) / abs(entry price - stop price)`.
 - Default leverage: 1x; configurable limit is 1x–5x. Leverage changes margin required, not the risk-budget formula.
 - Stop distance: 1.5 × ATR.
 - Default target: 2 × stop distance (2:1 reward/risk).
+- When price reaches +1R, the simulated stop moves to entry (breakeven); the initial stop remains recorded for the R calculation.
 - Entry uses best ask for LONG or best bid for SHORT; exit uses best bid for LONG or best ask for SHORT.
 - The simulated execution price includes 0.075% adverse slippage per fill and a 0.075% taker fee per fill.
 - Entry is skipped if required margin plus entry fee exceeds available margin.
@@ -143,6 +144,7 @@ The current vote display can show a majority without an entry signal: all gates 
 - An opposing qualified momentum signal can close early.
 - A net-losing stop applies a 3-candle cooldown (45 minutes at 15m interval) to that symbol and records indicator/volume feedback.
 - Daily realized losses aggregate UTC-day closed losing paper trades. Default limit is 400 USDT; it blocks new entries, not monitoring/closing existing positions.
+- Two consecutive closed losing trades during the same UTC day pause new entries until the next UTC day by default (`DAILY_CONSECUTIVE_LOSS_LIMIT=2`). Once triggered, the breaker remains latched for that day; it is calculated from persisted closed trades, so a process restart does not reset it.
 - One open account-wide position is enforced both in scanner logic and by MongoDB unique partial indexes.
 
 ## 6. API endpoints
@@ -186,6 +188,7 @@ Error codes such as `DATA_FEED_OFFLINE`, `INSUFFICIENT_HISTORICAL_DATA`, and `OR
   - `PAPER_LEVERAGE`: default 1, allowed 1–5.
   - `REWARD_RISK_RATIO`: default 2, allowed 1–10.
   - `DAILY_LOSS_LIMIT_USDT`: default 400.
+  - `DAILY_CONSECUTIVE_LOSS_LIMIT`: default 2 consecutive closed losses per UTC day.
   - `NTFY_TOPIC`: ntfy.sh topic for backend trade/circuit-breaker alerts; defaults to `auraalgo_live_897k3_rajesh`. Use a long random topic and keep it private because anyone who knows it can subscribe or publish.
   - `BINANCE_REST_URL`: default `https://data-api.binance.vision`.
   - `BINANCE_REST_BOOTSTRAP_ENABLED`: default true.

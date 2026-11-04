@@ -7,6 +7,7 @@ const paperTradeSchema = new mongoose.Schema(
     status: { type: String, required: true, enum: ['OPEN', 'CLOSED'], default: 'OPEN' },
     entryPrice: { type: Number, required: true, min: 0 },
     entryQuote: { type: Number, required: true, min: 0 },
+    initialStopLoss: { type: Number, default: null, min: 0 },
     exitPrice: { type: Number, default: null },
     exitQuote: { type: Number, default: null },
     executionCostUsd: { type: Number, required: true, min: 0, default: 0 },

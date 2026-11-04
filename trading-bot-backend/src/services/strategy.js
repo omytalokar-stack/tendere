@@ -10,10 +10,10 @@ const {
 const MIN_CANDLES = 250;
 const SUPER_TREND_PERIOD = 10;
 const SUPER_TREND_MULTIPLIER = 3;
-const RISK_PERCENT = 2;
-const MIN_ENTRY_VOTES = 7;
-const MIN_ENTRY_VOLUME_RATIO = 1.5;
-const MIN_ORDER_BOOK_PRESSURE_PERCENT = 60;
+const RISK_PERCENT = 1;
+const MIN_ENTRY_VOTES = 5;
+const MIN_ENTRY_VOLUME_RATIO = 1.2;
+const MIN_ORDER_BOOK_PRESSURE_PERCENT = 54;
 
 function latest(values) {
   return values.length ? values[values.length - 1] : undefined;
@@ -77,7 +77,7 @@ function calculateSupertrend(candles) {
 
 function getEntrySignal(analysis) {
   if (!analysis || !Number.isFinite(analysis.volumeRatio)
-    || analysis.volumeRatio <= MIN_ENTRY_VOLUME_RATIO) return null;
+    || analysis.volumeRatio < MIN_ENTRY_VOLUME_RATIO) return null;
 
   if (analysis.buyVotes >= MIN_ENTRY_VOTES
     && analysis.orderBookPressure?.bidPercent >= MIN_ORDER_BOOK_PRESSURE_PERCENT) return 'LONG';
