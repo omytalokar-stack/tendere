@@ -82,12 +82,14 @@ function formatSignedUsd(value: number): string {
 
 async function showBrowserNotification(title: string, body: string, tag: string): Promise<void> {
   if (!areBrowserAlertsEnabled()) return;
+  await navigator.serviceWorker.ready;
   const registration = await navigator.serviceWorker.getRegistration();
   if (!registration) throw new Error('Browser notification service worker is not registered.');
+  const notificationIcon = '/icons/auraalgo-192.png';
   await registration.showNotification(title, {
     body,
-    icon: '/vite.svg',
-    badge: '/vite.svg',
+    icon: notificationIcon,
+    badge: notificationIcon,
     tag,
     data: { url: '/' },
   });
