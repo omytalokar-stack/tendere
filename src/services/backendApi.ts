@@ -98,10 +98,16 @@ export interface BackendTrade {
   totalFeesUsd?: number;
   grossPnlUsd?: number;
   quantity: number;
+  initialQuantity?: number | null;
+  remainingQuantity?: number | null;
   margin: number;
   leverage: number;
   stopLoss: number;
   takeProfit: number;
+  tp1Price?: number | null;
+  tp2Price?: number | null;
+  tp1Filled?: boolean;
+  realizedPnl?: number;
   pnlUsd: number;
   pnlPercent: number;
   closeReason: 'TAKE_PROFIT' | 'STOP_LOSS' | 'EARLY_MOMENTUM_REVERSAL' | 'MANUAL' | null;

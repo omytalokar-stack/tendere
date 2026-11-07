@@ -6,6 +6,7 @@ const {
   getConfirmedEntrySignal,
   sizePosition,
   MIN_CANDLES,
+  MIN_ENTRY_VOTES,
   RISK_PERCENT,
 } = require('../src/services/strategy');
 
@@ -61,13 +62,16 @@ test('position sizing rejects non-positive stop prices', () => {
   }), /Invalid inputs/);
 });
 
-test('entry requires five aligned votes, volume at least 1.2x, and 54% aligned book pressure', () => {
+test('entry requires seven aligned votes, EMA-200 direction, volume at least 1.2x, and 54% book pressure', () => {
   const analysis = {
-    buyVotes: 5,
-    sellVotes: 4,
+    buyVotes: 7,
+    sellVotes: 2,
     volumeRatio: 1.2,
+    currentPrice: 101,
+    ema200: 100,
     orderBookPressure: { bidPercent: 54, askPercent: 46 },
   };
+  assert.equal(MIN_ENTRY_VOTES, 7);
   assert.equal(getEntrySignal(analysis), 'LONG');
   assert.equal(getEntrySignal({
     ...analysis,
@@ -78,25 +82,42 @@ test('entry requires five aligned votes, volume at least 1.2x, and 54% aligned b
     volumeRatio: 1.199999,
     orderBookPressure: { bidPercent: 55, askPercent: 45 },
   }), null);
+  assert.equal(getEntrySignal({ ...analysis, buyVotes: 6 }), null);
+  assert.equal(getEntrySignal({ ...analysis, currentPrice: 100 }), null);
+  assert.equal(getEntrySignal({ ...analysis, currentPrice: 99 }), null);
   assert.equal(getEntrySignal({
-    buyVotes: 4,
-    sellVotes: 5,
+    buyVotes: 2,
+    sellVotes: 7,
     volumeRatio: 1.2,
+    currentPrice: 99,
+    ema200: 100,
     orderBookPressure: { bidPercent: 46, askPercent: 54 },
   }), 'SHORT');
+  assert.equal(getEntrySignal({
+    buyVotes: 2,
+    sellVotes: 7,
+    volumeRatio: 1.2,
+    currentPrice: 100,
+    ema200: 100,
+    orderBookPressure: { bidPercent: 46, askPercent: 54 },
+  }), null);
 });
 
 test('five-minute entries require the fifteen-minute signal to confirm the same direction', () => {
   const long = {
-    buyVotes: 5,
-    sellVotes: 4,
+    buyVotes: 7,
+    sellVotes: 2,
     volumeRatio: 1.2,
+    currentPrice: 101,
+    ema200: 100,
     orderBookPressure: { bidPercent: 54, askPercent: 46 },
   };
   const short = {
-    buyVotes: 4,
-    sellVotes: 5,
+    buyVotes: 2,
+    sellVotes: 7,
     volumeRatio: 1.2,
+    currentPrice: 99,
+    ema200: 100,
     orderBookPressure: { bidPercent: 46, askPercent: 54 },
   };
   assert.equal(getConfirmedEntrySignal(long, long), 'LONG');

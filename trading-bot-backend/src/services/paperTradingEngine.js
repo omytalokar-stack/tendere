@@ -198,10 +198,7 @@ class PaperTradingEngine {
 
       const openTrade = await PaperTrade.findOne({ symbol, status: 'OPEN' });
       if (interval === config.candleInterval && openTrade && candle.isFinal !== true) {
-        let exit = this.getExit(openTrade, candle);
-        if (!exit && await this.moveStopToBreakeven(openTrade, candle)) {
-          exit = this.getExit(openTrade, candle);
-        }
+        const exit = this.getExit(openTrade, candle);
         if (exit) {
           this.pendingExits.set(symbol, exit.reason);
           const closed = await this.closeAtMarket(openTrade, exit.reason);
@@ -260,9 +257,6 @@ class PaperTradingEngine {
     if (openTrade) {
       if (interval === config.candleInterval) {
         let exit = this.getExit(openTrade, candle);
-        if (!exit && await this.moveStopToBreakeven(openTrade, candle)) {
-          exit = this.getExit(openTrade, candle);
-        }
         if (!exit) exit = await this.getMomentumReversal(openTrade, history);
         if (exit) {
           this.pendingExits.set(symbol, exit.reason);
@@ -335,10 +329,13 @@ class PaperTradingEngine {
       const stopLoss = direction === 'LONG'
         ? entryPrice - stopDistance
         : entryPrice + stopDistance;
-      const takeProfit = direction === 'LONG'
-        ? entryPrice + stopDistance * config.rewardRiskRatio
-        : entryPrice - stopDistance * config.rewardRiskRatio;
-      if (stopLoss <= 0 || takeProfit <= 0) continue;
+      const tp1Price = direction === 'LONG'
+        ? entryPrice + analysis.atr * 1.5
+        : entryPrice - analysis.atr * 1.5;
+      const tp2Price = direction === 'LONG'
+        ? entryPrice + analysis.atr * 3
+        : entryPrice - analysis.atr * 3;
+      if (stopLoss <= 0 || tp1Price <= 0 || tp2Price <= 0) continue;
 
       const position = sizePosition({
         balance: wallet.balance,
@@ -361,11 +358,17 @@ class PaperTradingEngine {
         entryFeeUsd,
         exitFeeUsd: 0,
         totalFeesUsd: entryFeeUsd,
+        initialQuantity: position.quantity,
+        remainingQuantity: position.quantity,
+        tp1Price,
+        tp2Price,
+        tp1Filled: false,
+        realizedPnl: 0,
         quantity: position.quantity,
         margin: position.margin,
         leverage: config.leverage,
         stopLoss,
-        takeProfit,
+        takeProfit: tp2Price,
         strategy: `${interval}${confirmationAnalysis ? ' + 15m confirmed' : ''}: ${analysis.strategy} (${direction === 'LONG' ? analysis.buyVotes : analysis.sellVotes}/${analysis.totalVotes})`,
         openedAt: new Date(),
       });
@@ -410,38 +413,6 @@ class PaperTradingEngine {
     return null;
   }
 
-  async moveStopToBreakeven(trade, candle) {
-    const initialStopLoss = Number.isFinite(trade.initialStopLoss)
-      ? trade.initialStopLoss
-      : trade.stopLoss;
-    const riskDistance = trade.side === 'LONG'
-      ? trade.entryPrice - initialStopLoss
-      : initialStopLoss - trade.entryPrice;
-    if (!Number.isFinite(riskDistance) || riskDistance <= 0) return false;
-
-    const breakevenAlreadySet = trade.side === 'LONG'
-      ? trade.stopLoss >= trade.entryPrice
-      : trade.stopLoss <= trade.entryPrice;
-    if (breakevenAlreadySet) return false;
-
-    const reachedOneR = trade.side === 'LONG'
-      ? candle.high >= trade.entryPrice + riskDistance
-      : candle.low <= trade.entryPrice - riskDistance;
-    if (!reachedOneR) return false;
-
-    const previousStopLoss = trade.stopLoss;
-    const result = await PaperTrade.updateOne(
-      { _id: trade._id, status: 'OPEN', stopLoss: previousStopLoss },
-      { $set: { stopLoss: trade.entryPrice, initialStopLoss } },
-    );
-    if (result.matchedCount !== 1) return false;
-
-    trade.initialStopLoss = initialStopLoss;
-    trade.stopLoss = trade.entryPrice;
-    this.recordAudit('TRADE', trade.symbol, 'Moved paper stop-loss to breakeven after +1R');
-    return true;
-  }
-
   isOrderBookFresh(orderBook) {
     return Boolean(orderBook
       && Date.now() - new Date(orderBook.updatedAt).getTime() <= MAX_MARKET_DATA_AGE_MS
@@ -481,19 +452,26 @@ class PaperTradingEngine {
   }
 
   getExit(trade, candle) {
+    const hasTp1Price = Number.isFinite(trade.tp1Price);
+    const target = trade.tp1Filled === true
+      ? (trade.tp2Price ?? trade.takeProfit)
+      : (hasTp1Price ? trade.tp1Price : trade.takeProfit);
+    const targetReason = trade.tp1Filled === true || !hasTp1Price
+      ? 'TAKE_PROFIT'
+      : 'PARTIAL_TP1_FILLED';
     if (trade.side === 'LONG') {
       if (candle.low <= trade.stopLoss) {
         return { reason: 'STOP_LOSS' };
       }
-      if (candle.high >= trade.takeProfit) {
-        return { reason: 'TAKE_PROFIT' };
+      if (Number.isFinite(target) && candle.high >= target) {
+        return { reason: targetReason };
       }
     } else {
       if (candle.high >= trade.stopLoss) {
         return { reason: 'STOP_LOSS' };
       }
-      if (candle.low <= trade.takeProfit) {
-        return { reason: 'TAKE_PROFIT' };
+      if (Number.isFinite(target) && candle.low <= target) {
+        return { reason: targetReason };
       }
     }
     return null;
@@ -601,15 +579,20 @@ class PaperTradingEngine {
       });
   }
 
-  calculateTradeResult(trade, exitPrice) {
+  calculateTradeResult(
+    trade,
+    exitPrice,
+    quantity = trade.quantity,
+    entryFeeUsd = trade.entryFeeUsd
+  ) {
     const sign = trade.side === 'LONG' ? 1 : -1;
-    const grossPnlUsd = round(sign * (exitPrice - trade.entryPrice) * trade.quantity, 8);
-    const entryFeeUsd = Number(trade.entryFeeUsd || 0);
-    const exitFeeUsd = round(exitPrice * trade.quantity * TAKER_FEE_RATE, 8);
-    const totalFeesUsd = round(entryFeeUsd + exitFeeUsd, 8);
+    const grossPnlUsd = round(sign * (exitPrice - trade.entryPrice) * quantity, 8);
+    const allocatedEntryFeeUsd = Number(entryFeeUsd || 0);
+    const exitFeeUsd = round(exitPrice * quantity * TAKER_FEE_RATE, 8);
+    const totalFeesUsd = round(allocatedEntryFeeUsd + exitFeeUsd, 8);
     return {
       grossPnlUsd,
-      entryFeeUsd,
+      entryFeeUsd: allocatedEntryFeeUsd,
       exitFeeUsd,
       totalFeesUsd,
       netPnlUsd: round(grossPnlUsd - totalFeesUsd, 8),
@@ -685,47 +668,96 @@ class PaperTradingEngine {
       await session.withTransaction(async () => {
         const trade = await PaperTrade.findOne({ _id: tradeId, status: 'OPEN' }).session(session);
         if (!trade) return;
-        const result = this.calculateTradeResult(trade, exitPrice);
-        const { grossPnlUsd, entryFeeUsd, exitFeeUsd, totalFeesUsd, netPnlUsd } = result;
-        const pnlPercent = round((netPnlUsd / trade.margin) * 100, 2);
-        const exitCost = Math.abs(exitPrice - exitQuote) * trade.quantity;
-        const isStopLoss = closeReason === 'STOP_LOSS' && netPnlUsd < 0;
+        const isPartialTp1 = closeReason === 'PARTIAL_TP1_FILLED';
+        if (isPartialTp1 && trade.tp1Filled === true) return;
+        const initialQuantity = Number(trade.initialQuantity || trade.quantity);
+        const remainingQuantity = Number(trade.remainingQuantity ?? trade.quantity);
+        const exitQuantity = isPartialTp1
+          ? round(initialQuantity * 0.5, 8)
+          : remainingQuantity;
+        if (!Number.isFinite(exitQuantity) || exitQuantity <= 0 || exitQuantity > remainingQuantity) {
+          throw new Error(`Invalid exit quantity for trade ${trade.id}`);
+        }
+
+        const priorRealizedPnl = Number(trade.realizedPnl || 0);
+        const priorGrossPnlUsd = Number(trade.grossPnlUsd || 0);
+        const priorExitFeeUsd = Number(trade.exitFeeUsd || 0);
+        const allocatedEntryFees = round(
+          priorGrossPnlUsd - priorExitFeeUsd - priorRealizedPnl,
+          8,
+        );
+        const entryFeeForExit = isPartialTp1
+          ? round(Number(trade.entryFeeUsd || 0) * exitQuantity / initialQuantity, 8)
+          : round(Number(trade.entryFeeUsd || 0) - allocatedEntryFees, 8);
+        const result = this.calculateTradeResult(trade, exitPrice, exitQuantity, entryFeeForExit);
+        const { grossPnlUsd, exitFeeUsd, totalFeesUsd, netPnlUsd } = result;
+        const cumulativeRealizedPnl = round(priorRealizedPnl + netPnlUsd, 8);
+        const cumulativeGrossPnlUsd = round(priorGrossPnlUsd + grossPnlUsd, 8);
+        const cumulativeExitFeeUsd = round(priorExitFeeUsd + exitFeeUsd, 8);
+        const cumulativeFeesUsd = round(Number(trade.entryFeeUsd || 0) + cumulativeExitFeeUsd, 8);
+        const pnlPercent = round((cumulativeRealizedPnl / trade.margin) * 100, 2);
+        const exitCost = Math.abs(exitPrice - exitQuote) * exitQuantity;
+        const isStopLoss = closeReason === 'STOP_LOSS' && cumulativeRealizedPnl < 0;
         const closedAt = new Date();
         const cooldownUntil = isStopLoss ? this.getCooldownUntil(closedAt) : null;
+        const newRemainingQuantity = isPartialTp1
+          ? round(remainingQuantity - exitQuantity, 8)
+          : 0;
+        const bufferedStopLoss = trade.side === 'LONG'
+          ? round(trade.entryPrice * 1.0035, 8)
+          : round(trade.entryPrice * 0.9965, 8);
+        const releaseMargin = round(trade.margin * exitQuantity / initialQuantity, 8);
+        const tradeFields = {
+          exitPrice,
+          exitQuote,
+          executionCostUsd: round(Number(trade.executionCostUsd || 0) + exitCost, 8),
+          exitFeeUsd: cumulativeExitFeeUsd,
+          totalFeesUsd: cumulativeFeesUsd,
+          grossPnlUsd: cumulativeGrossPnlUsd,
+          pnlUsd: cumulativeRealizedPnl,
+          pnlPercent,
+          realizedPnl: cumulativeRealizedPnl,
+        };
+        if (isPartialTp1) {
+          Object.assign(tradeFields, {
+            tp1Filled: true,
+            remainingQuantity: newRemainingQuantity,
+            stopLoss: bufferedStopLoss,
+          });
+        } else {
+          Object.assign(tradeFields, {
+            status: 'CLOSED',
+            remainingQuantity: 0,
+            closeReason,
+            closedAt,
+            failureAnalysis: isStopLoss ? failureAnalysis : null,
+            cooldownUntil,
+          });
+        }
 
         const tradeUpdate = await PaperTrade.updateOne(
-          { _id: trade._id, status: 'OPEN' },
           {
-            $set: {
-              status: 'CLOSED',
-              exitPrice,
-              exitQuote,
-              executionCostUsd: round(Number(trade.executionCostUsd || 0) + exitCost, 8),
-              entryFeeUsd,
-              exitFeeUsd,
-              totalFeesUsd,
-              grossPnlUsd,
-              pnlUsd: netPnlUsd,
-              pnlPercent,
-              closeReason,
-              closedAt,
-              failureAnalysis: isStopLoss ? failureAnalysis : null,
-              cooldownUntil,
-            },
+            _id: trade._id,
+            status: 'OPEN',
+            ...(isPartialTp1 ? { tp1Filled: { $ne: true } } : {}),
           },
+          { $set: tradeFields },
           { session }
         );
-        if (tradeUpdate.matchedCount !== 1) throw new Error(`Trade ${trade.id} was concurrently closed`);
+        if (tradeUpdate.matchedCount !== 1) {
+          if (isPartialTp1) return;
+          throw new Error(`Trade ${trade.id} was concurrently closed`);
+        }
         updatedWallet = await VirtualWallet.findOneAndUpdate(
-          { _id: 'primary', inTradeMargin: { $gte: trade.margin } },
+          { _id: 'primary', inTradeMargin: { $gte: releaseMargin } },
           {
             $inc: {
               balance: netPnlUsd,
-              availableMargin: trade.margin + grossPnlUsd - exitFeeUsd,
-              inTradeMargin: -trade.margin,
+              availableMargin: releaseMargin + grossPnlUsd - exitFeeUsd,
+              inTradeMargin: -releaseMargin,
               totalRealizedPnl: netPnlUsd,
-              winCount: netPnlUsd > 0 ? 1 : 0,
-              lossCount: netPnlUsd <= 0 ? 1 : 0,
+              winCount: !isPartialTp1 && cumulativeRealizedPnl > 0 ? 1 : 0,
+              lossCount: !isPartialTp1 && cumulativeRealizedPnl <= 0 ? 1 : 0,
             },
           },
           { returnDocument: 'after', session }
@@ -736,17 +768,30 @@ class PaperTradingEngine {
           symbol: trade.symbol,
           side: trade.side,
           exitPrice,
-          pnlUsd: netPnlUsd,
+          pnlUsd: cumulativeRealizedPnl,
+          cumulativePnlUsd: cumulativeRealizedPnl,
           pnlPercent,
-          grossPnlUsd,
-          totalFeesUsd,
+          grossPnlUsd: cumulativeGrossPnlUsd,
+          realizedPnlUsd: netPnlUsd,
+          feesDeductedUsd: totalFeesUsd,
+          totalFeesUsd: cumulativeFeesUsd,
           closeReason,
+          isPartialTp1,
+          stopLoss: isPartialTp1 ? bufferedStopLoss : trade.stopLoss,
           cooldownUntil,
           walletBalance: updatedWallet.balance,
         };
       });
-      if (closedTrade) this.logger.info('Paper position closed', closedTrade);
-      if (closedTrade) {
+      if (closedTrade && closedTrade.isPartialTp1) {
+        this.logger.info('Paper position partially closed at TP1', closedTrade);
+        this.recordAudit(
+          'TRADE',
+          closedTrade.symbol,
+          `PARTIAL_TP1_FILLED; realized P&L ${closedTrade.realizedPnlUsd.toFixed(8)} USDT; fees deducted ${closedTrade.feesDeductedUsd.toFixed(8)} USDT; new stop-loss ${closedTrade.stopLoss}`,
+        );
+      }
+      if (closedTrade && !closedTrade.isPartialTp1) this.logger.info('Paper position closed', closedTrade);
+      if (closedTrade && !closedTrade.isPartialTp1) {
         this.dispatchNotification('trade closed', () =>
           notifyTradeClosed(closedTrade, this.logger));
         const cooldownMessage = closedTrade.cooldownUntil

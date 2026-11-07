@@ -11,7 +11,7 @@ const MIN_CANDLES = 250;
 const SUPER_TREND_PERIOD = 10;
 const SUPER_TREND_MULTIPLIER = 3;
 const RISK_PERCENT = 1;
-const MIN_ENTRY_VOTES = 5;
+const MIN_ENTRY_VOTES = 7;
 const MIN_ENTRY_VOLUME_RATIO = 1.2;
 const MIN_ORDER_BOOK_PRESSURE_PERCENT = 54;
 
@@ -80,8 +80,10 @@ function getEntrySignal(analysis) {
     || analysis.volumeRatio < MIN_ENTRY_VOLUME_RATIO) return null;
 
   if (analysis.buyVotes >= MIN_ENTRY_VOTES
+    && analysis.currentPrice > analysis.ema200
     && analysis.orderBookPressure?.bidPercent >= MIN_ORDER_BOOK_PRESSURE_PERCENT) return 'LONG';
   if (analysis.sellVotes >= MIN_ENTRY_VOTES
+    && analysis.currentPrice < analysis.ema200
     && analysis.orderBookPressure?.askPercent >= MIN_ORDER_BOOK_PRESSURE_PERCENT) return 'SHORT';
   return null;
 }
@@ -166,6 +168,7 @@ function analyzeCandles(candles, orderBook) {
     sellVotes,
     totalVotes: votes.length,
     currentPrice: currentClose,
+    ema200,
     atr,
     rsi,
     adx: adx.adx,

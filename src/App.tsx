@@ -78,10 +78,16 @@ function formatUsd(value: number) {
 
 function pnlFor(trade: BackendTrade, markPrice: number, takerFeeRate: number) {
   const direction = trade.side === 'LONG' ? 1 : -1;
-  const grossPnlUsd = direction * (markPrice - trade.entryPrice) * trade.quantity;
-  const entryFeeUsd = trade.entryFeeUsd ?? 0;
-  const estimatedExitFeeUsd = markPrice * trade.quantity * takerFeeRate;
-  const pnlUsd = grossPnlUsd - entryFeeUsd - estimatedExitFeeUsd;
+  const initialQuantity = trade.initialQuantity ?? trade.quantity;
+  const remainingQuantity = trade.remainingQuantity ?? trade.quantity;
+  const grossPnlUsd = direction * (markPrice - trade.entryPrice) * remainingQuantity;
+  const remainingEntryFeeUsd = (trade.entryFeeUsd ?? 0)
+    * (initialQuantity > 0 ? remainingQuantity / initialQuantity : 1);
+  const estimatedExitFeeUsd = markPrice * remainingQuantity * takerFeeRate;
+  const pnlUsd = (trade.realizedPnl ?? 0)
+    + grossPnlUsd
+    - remainingEntryFeeUsd
+    - estimatedExitFeeUsd;
   return {
     pnlUsd,
     pnlPercent: trade.margin > 0 ? (pnlUsd / trade.margin) * 100 : 0,
@@ -668,12 +674,17 @@ function HomeTab({
             <div className="mt-5 rounded-2xl border border-purple-400/10 bg-black/15 p-4">
               <div className="flex justify-between gap-2 text-[10px] font-mono">
                 <span className="text-pink-200">Stop ${formatPrice(trade.stopLoss, coin.decimals)}</span>
-                <span className="text-emerald-200">Target ${formatPrice(trade.takeProfit, coin.decimals)}</span>
+                {trade.tp1Price != null && (
+                  <span className="text-emerald-200">
+                    {trade.tp1Filled ? 'TP1 filled' : 'TP1'} ${formatPrice(trade.tp1Price, coin.decimals)}
+                  </span>
+                )}
+                <span className="text-emerald-200">TP2 ${formatPrice(trade.tp2Price ?? trade.takeProfit, coin.decimals)}</span>
               </div>
               <div className="relative mt-3 h-2 overflow-hidden rounded-full bg-slate-800">
                 <div className="absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-pink-500 via-purple-400 to-emerald-400 transition-all duration-700" style={{ width: `${Math.min(100, Math.max(0, progress))}%` }} />
               </div>
-              <p className="mt-2 text-right text-[10px] text-slate-500">Position relative to backend stop and target</p>
+              <p className="mt-2 text-right text-[10px] text-slate-500">Position relative to backend stop and targets</p>
             </div>
 
             <button

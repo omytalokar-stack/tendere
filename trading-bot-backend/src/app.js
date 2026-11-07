@@ -15,7 +15,7 @@ async function getAgentSnapshot(engine) {
     engine.status(),
     VirtualWallet.findById('primary').lean(),
     PaperTrade.find({})
-      .select('_id symbol side status entryPrice exitPrice quantity margin leverage stopLoss takeProfit pnlUsd pnlPercent closeReason openedAt closedAt')
+      .select('_id symbol side status entryPrice exitPrice quantity initialQuantity remainingQuantity margin leverage stopLoss takeProfit tp1Price tp2Price tp1Filled realizedPnl pnlUsd pnlPercent closeReason openedAt closedAt')
       .sort({ openedAt: -1 })
       .limit(50)
       .lean(),
@@ -46,10 +46,16 @@ async function getAgentSnapshot(engine) {
     entryPrice: trade.entryPrice,
     exitPrice: trade.exitPrice,
     quantity: trade.quantity,
+    initialQuantity: trade.initialQuantity,
+    remainingQuantity: trade.remainingQuantity,
     margin: trade.margin,
     leverage: trade.leverage,
     stopLoss: trade.stopLoss,
     takeProfit: trade.takeProfit,
+    tp1Price: trade.tp1Price,
+    tp2Price: trade.tp2Price,
+    tp1Filled: trade.tp1Filled,
+    realizedPnl: trade.realizedPnl,
     pnlUsd: trade.pnlUsd,
     pnlPercent: trade.pnlPercent,
     closeReason: trade.closeReason,

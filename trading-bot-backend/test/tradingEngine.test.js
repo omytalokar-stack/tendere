@@ -41,42 +41,45 @@ test('a closed candle crossing a stop-loss returns no assumed fill price', () =>
   assert.deepEqual(exit, { reason: 'STOP_LOSS' });
 });
 
-test('a favorable one-R move persists a breakeven stop for long and short positions', async () => {
-  const originalUpdateOne = PaperTrade.updateOne;
-  const updates = [];
-  PaperTrade.updateOne = async (filter, update) => {
-    updates.push({ filter, update });
-    return { matchedCount: 1 };
+test('TP1, TP2, and buffered stop-loss trigger the correct long and short exits', () => {
+  const engine = new PaperTradingEngine({ logger: { info() {}, warn() {}, error() {} } });
+  const long = {
+    side: 'LONG',
+    stopLoss: 98.5,
+    tp1Price: 101.5,
+    tp2Price: 103,
+    takeProfit: 103,
   };
-  try {
-    const engine = new PaperTradingEngine({ logger: { info() {}, warn() {}, error() {} } });
-    const long = {
-      _id: 'long-trade',
-      symbol: 'ETHUSDT',
-      side: 'LONG',
-      entryPrice: 100,
-      stopLoss: 90,
-      initialStopLoss: 90,
-    };
-    assert.equal(await engine.moveStopToBreakeven(long, { high: 109, low: 99 }), false);
-    assert.equal(await engine.moveStopToBreakeven(long, { high: 110, low: 99 }), true);
-    assert.equal(long.stopLoss, 100);
-    assert.deepEqual(updates[0].update, { $set: { stopLoss: 100, initialStopLoss: 90 } });
+  assert.deepEqual(engine.getExit(long, { high: 101.5, low: 99 }), {
+    reason: 'PARTIAL_TP1_FILLED',
+  });
+  assert.deepEqual(engine.getExit({ ...long, tp1Filled: true, stopLoss: 100.35 }, {
+    high: 103,
+    low: 101,
+  }), { reason: 'TAKE_PROFIT' });
+  assert.deepEqual(engine.getExit({ ...long, tp1Filled: true, stopLoss: 100.35 }, {
+    high: 102,
+    low: 100.35,
+  }), { reason: 'STOP_LOSS' });
 
-    const short = {
-      _id: 'short-trade',
-      symbol: 'SOLUSDT',
-      side: 'SHORT',
-      entryPrice: 100,
-      stopLoss: 110,
-      initialStopLoss: 110,
-    };
-    assert.equal(await engine.moveStopToBreakeven(short, { high: 101, low: 90 }), true);
-    assert.equal(short.stopLoss, 100);
-    assert.equal(updates[1].filter.stopLoss, 110);
-  } finally {
-    PaperTrade.updateOne = originalUpdateOne;
-  }
+  const short = {
+    side: 'SHORT',
+    stopLoss: 101.5,
+    tp1Price: 98.5,
+    tp2Price: 97,
+    takeProfit: 97,
+  };
+  assert.deepEqual(engine.getExit(short, { high: 101, low: 98.5 }), {
+    reason: 'PARTIAL_TP1_FILLED',
+  });
+  assert.deepEqual(engine.getExit({ ...short, tp1Filled: true, stopLoss: 99.65 }, {
+    high: 99,
+    low: 97,
+  }), { reason: 'TAKE_PROFIT' });
+  assert.deepEqual(engine.getExit({ ...short, tp1Filled: true, stopLoss: 99.65 }, {
+    high: 99.65,
+    low: 98,
+  }), { reason: 'STOP_LOSS' });
 });
 
 test('fresh Binance depth keeps a quiet market ready and supplies a labeled midpoint quote', () => {
@@ -172,11 +175,103 @@ test('paper trade schema persists fees, stop-loss feedback, and one account-wide
   assert.equal(trade.totalFeesUsd, 0);
   assert.equal(trade.failureAnalysis, null);
   assert.equal(trade.cooldownUntil, null);
+  assert.equal(trade.tp1Filled, false);
+  assert.equal(trade.realizedPnl, 0);
+  for (const field of ['initialQuantity', 'remainingQuantity', 'tp1Price', 'tp2Price']) {
+    assert.ok(PaperTrade.schema.path(field));
+  }
   assert.ok(PaperTrade.schema.path('closeReason').enumValues.includes('EARLY_MOMENTUM_REVERSAL'));
   assert.ok(PaperTrade.schema.indexes().some(([, options]) =>
     options.name === 'one_open_paper_trade_per_account'
     && options.unique
     && options.partialFilterExpression.status === 'OPEN'));
+});
+
+test('TP1 transaction realizes half the position, returns proportional margin, and buffers the stop', async () => {
+  const originals = {
+    startSession: mongoose.startSession,
+    findOne: PaperTrade.findOne,
+    updateTrade: PaperTrade.updateOne,
+    updateWallet: VirtualWallet.findOneAndUpdate,
+  };
+  const trade = {
+    _id: 'paper-trade-test',
+    id: 'paper-trade-test',
+    symbol: 'ETHUSDT',
+    side: 'LONG',
+    status: 'OPEN',
+    entryPrice: 100,
+    entryFeeUsd: 0.15,
+    exitFeeUsd: 0,
+    totalFeesUsd: 0.15,
+    quantity: 2,
+    initialQuantity: 2,
+    remainingQuantity: 2,
+    margin: 500,
+    executionCostUsd: 0,
+    grossPnlUsd: 0,
+    realizedPnl: 0,
+    tp1Filled: false,
+  };
+  let tradeFilter;
+  let tradeUpdate;
+  let walletUpdate;
+  mongoose.startSession = async () => ({
+    withTransaction: async (operation) => operation(),
+    endSession: async () => {},
+  });
+  PaperTrade.findOne = () => ({ session: async () => trade });
+  PaperTrade.updateOne = async (filter, update) => {
+    tradeFilter = filter;
+    tradeUpdate = update;
+    Object.assign(trade, update.$set);
+    return { matchedCount: 1 };
+  };
+  VirtualWallet.findOneAndUpdate = async (_filter, update) => {
+    walletUpdate = update;
+    return { balance: 10_004.84625 };
+  };
+  try {
+    const engine = new PaperTradingEngine({ logger: { info() {}, warn() {}, error() {} } });
+    const partial = await engine.closeTrade(
+      trade._id,
+      105,
+      'PARTIAL_TP1_FILLED',
+      105,
+    );
+    assert.equal(partial.isPartialTp1, true);
+    assert.equal(partial.realizedPnlUsd, 4.84625);
+    assert.equal(partial.feesDeductedUsd, 0.15375);
+    assert.equal(partial.stopLoss, 100.35);
+    assert.equal(tradeFilter.tp1Filled.$ne, true);
+    assert.equal(tradeUpdate.$set.tp1Filled, true);
+    assert.equal(tradeUpdate.$set.remainingQuantity, 1);
+    assert.equal(tradeUpdate.$set.realizedPnl, 4.84625);
+    assert.equal(walletUpdate.$inc.balance, 4.84625);
+    assert.equal(walletUpdate.$inc.availableMargin, 254.92125);
+    assert.equal(walletUpdate.$inc.inTradeMargin, -250);
+    assert.equal(walletUpdate.$inc.winCount, 0);
+    assert.equal(walletUpdate.$inc.lossCount, 0);
+    assert.match(engine.getAuditLog()[0].message, /PARTIAL_TP1_FILLED/);
+    assert.match(engine.getAuditLog()[0].message, /fees deducted 0\.15375000 USDT/);
+    assert.match(engine.getAuditLog()[0].message, /new stop-loss 100\.35/);
+
+    const closed = await engine.closeTrade(trade._id, 100.35, 'STOP_LOSS', 100.35);
+    assert.equal(closed.pnlUsd, 5.0459875);
+    assert.equal(tradeUpdate.$set.realizedPnl, 5.0459875);
+    assert.equal(tradeUpdate.$set.totalFeesUsd, 0.3040125);
+    assert.equal(tradeUpdate.$set.remainingQuantity, 0);
+    assert.equal(walletUpdate.$inc.balance, 0.1997375);
+    assert.equal(walletUpdate.$inc.totalRealizedPnl, 0.1997375);
+    assert.equal(walletUpdate.$inc.inTradeMargin, -250);
+    assert.equal(walletUpdate.$inc.winCount, 1);
+    assert.equal(walletUpdate.$inc.lossCount, 0);
+  } finally {
+    mongoose.startSession = originals.startSession;
+    PaperTrade.findOne = originals.findOne;
+    PaperTrade.updateOne = originals.updateTrade;
+    VirtualWallet.findOneAndUpdate = originals.updateWallet;
+  }
 });
 
 test('realized paper P&L deducts both 0.075% taker fees from gross P&L', () => {
