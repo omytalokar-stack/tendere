@@ -293,7 +293,6 @@ class PaperTradingEngine {
       : null;
     if (confirmationHistories && !SYMBOLS.every((symbol) =>
       this.isCandleHistoryComplete(confirmationHistories.get(symbol)))) return;
-    if (await PaperTrade.exists({ status: 'OPEN' })) return;
     if (await this.dailyLossLimitReached()) {
       this.logger.warn('Daily loss limit reached; new paper positions are paused');
       this.sendDailyLossAlertOnce();
@@ -311,7 +310,7 @@ class PaperTradingEngine {
       if (await this.isSymbolCoolingDown(symbol)) continue;
       const history = histories.get(symbol);
       const executionBook = await this.refreshExecutionBook(symbol);
-      if (!this.isOrderBookFresh(executionBook)) return;
+      if (!this.isOrderBookFresh(executionBook)) continue;
 
       const analysis = analyzeCandles(history, executionBook);
       const confirmationAnalysis = confirmationHistories
@@ -348,7 +347,7 @@ class PaperTradingEngine {
         || position.margin + entryFeeUsd > wallet.availableMargin
         || position.quantity <= 0) continue;
 
-      const trade = await this.openTrade({
+      await this.openTrade({
         symbol,
         side: direction,
         entryPrice,
@@ -372,9 +371,6 @@ class PaperTradingEngine {
         strategy: `${interval}${confirmationAnalysis ? ' + 15m confirmed' : ''}: ${analysis.strategy} (${direction === 'LONG' ? analysis.buyVotes : analysis.sellVotes}/${analysis.totalVotes})`,
         openedAt: new Date(),
       });
-      if (trade) {
-        return;
-      }
     }
   }
 
@@ -609,7 +605,10 @@ class PaperTradingEngine {
     try {
       let createdTrade;
       await session.withTransaction(async () => {
-        const existingTrade = await PaperTrade.findOne({ status: 'OPEN' }).session(session);
+        const existingTrade = await PaperTrade.findOne({
+          symbol: tradeData.symbol,
+          status: 'OPEN',
+        }).session(session);
         if (existingTrade) return;
         const wallet = await VirtualWallet.findOneAndUpdate(
           {
@@ -643,8 +642,10 @@ class PaperTradingEngine {
       return createdTrade || null;
     } catch (error) {
       if (error.code !== 11000) throw error;
-      this.logger.warn('Another paper position was opened concurrently; entry skipped', { symbol: tradeData.symbol });
-      this.recordAudit('TRADE', tradeData.symbol, 'Entry skipped: account already has an open paper position');
+      this.logger.warn('A paper position for this symbol was opened concurrently; entry skipped', {
+        symbol: tradeData.symbol,
+      });
+      this.recordAudit('TRADE', tradeData.symbol, 'Entry skipped: this symbol already has an open paper position');
       return null;
     } finally {
       await session.endSession();

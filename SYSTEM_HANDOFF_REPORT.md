@@ -69,7 +69,7 @@ Render (Node.js/Express)
   - `BotState.js`: persistent enabled/paused state.
   - `VirtualWallet.js`: virtual balance, margin and realized P&L.
   - `PaperTrade.js`: open/closed simulated trades and execution/analysis fields.
-- The trade schema has unique partial indexes limiting the account to one open position. Wallet/trade opens and closes use MongoDB transactions, so use an Atlas replica set.
+- The trade schema has a unique partial index limiting each symbol to one open position; different symbols can be open at the same time if available margin permits. Startup removes the legacy account-wide index. Wallet/trade opens and closes use MongoDB transactions, so use an Atlas replica set.
 
 ## 4. Binance market data and real-data checks
 
@@ -145,7 +145,7 @@ The current vote display can show a majority without an entry signal: all gates 
 - A net-losing stop applies a 3-candle cooldown (45 minutes at 15m interval) to that symbol and records indicator/volume feedback.
 - Daily realized losses aggregate UTC-day closed losing paper trades. Default limit is 400 USDT; it blocks new entries, not monitoring/closing existing positions.
 - Two consecutive closed losing trades during the same UTC day pause new entries until the next UTC day by default (`DAILY_CONSECUTIVE_LOSS_LIMIT=2`). Once triggered, the breaker remains latched for that day; it is calculated from persisted closed trades, so a process restart does not reset it.
-- One open account-wide position is enforced both in scanner logic and by MongoDB unique partial indexes.
+- Multiple qualified symbols can open positions during the same scan, bounded by available wallet margin; each symbol is protected by a MongoDB unique partial index.
 
 ## 6. API endpoints
 

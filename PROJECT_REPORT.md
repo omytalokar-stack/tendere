@@ -143,7 +143,7 @@ Planned 1% risk **maximum guaranteed loss nahi** hai. Slippage, fees, quote timi
 
 `VirtualWallet` mein balance, available margin, in-trade margin, realized P&L aur win/loss counts store hote hain. Entry par margin + entry fee reserve hote hain; close par margin/P&L/exit fee ke hisaab se wallet update hota hai.
 
-Entry/close wallet aur trade changes MongoDB transaction mein hote hain. Database indexes account-wide ek open trade limit karte hain; scanner bhi entry se pehle open trade check karta hai. Transactions ke liye MongoDB Atlas jaise replica-set environment ki zaroorat hoti hai.
+Entry/close wallet aur trade changes MongoDB transaction mein hote hain. Scanner ek scan mein har qualifying symbol ke liye entry ki koshish karta hai; available margin limits total positions, aur unique database index har symbol par ek hi open trade allow karta hai. Startup par purana account-wide index remove hota hai. Transactions ke liye MongoDB Atlas jaise replica-set environment ki zaroorat hoti hai.
 
 Net-losing STOP_LOSS ke baad us symbol ko 3 configured candle intervals ka cooldown lagta hai—default 15m interval par 45 minute. Default do consecutive losing closed trades ek UTC day mein hone par nayi entries agle UTC day tak rukti hain. Alag daily realized-loss cap (default 400 USDT) bhi nayi entries rokta hai; existing trade monitoring band nahi karta. Consecutive-loss count persisted closed trades se calculate hota hai, isliye backend restart se breaker reset nahi hota.
 

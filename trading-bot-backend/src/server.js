@@ -13,6 +13,11 @@ async function main() {
     maxPoolSize: 10,
   });
   await Promise.all([BotState.init(), PaperTrade.init(), VirtualWallet.init()]);
+  try {
+    await PaperTrade.collection.dropIndex('one_open_paper_trade_per_account');
+  } catch (error) {
+    if (error.code !== 27) throw error;
+  }
   console.info('Connected to MongoDB');
 
   const engine = new PaperTradingEngine();

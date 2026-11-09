@@ -46,10 +46,6 @@ paperTradeSchema.index(
   { symbol: 1 },
   { unique: true, partialFilterExpression: { status: 'OPEN' } }
 );
-paperTradeSchema.index(
-  { status: 1 },
-  { unique: true, partialFilterExpression: { status: 'OPEN' }, name: 'one_open_paper_trade_per_account' }
-);
 paperTradeSchema.index({ status: 1, openedAt: -1 });
 paperTradeSchema.index({ closedAt: -1 });
 

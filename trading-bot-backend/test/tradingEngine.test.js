@@ -168,7 +168,7 @@ test('paper exits use a fresh Binance depth quote even when the last trade tick 
   assert.equal(result[3], 99);
 });
 
-test('paper trade schema persists fees, stop-loss feedback, and one account-wide open position', () => {
+test('paper trade schema persists fees, stop-loss feedback, and one open position per symbol', () => {
   const trade = new PaperTrade();
   assert.equal(trade.entryFeeUsd, 0);
   assert.equal(trade.exitFeeUsd, 0);
@@ -181,10 +181,12 @@ test('paper trade schema persists fees, stop-loss feedback, and one account-wide
     assert.ok(PaperTrade.schema.path(field));
   }
   assert.ok(PaperTrade.schema.path('closeReason').enumValues.includes('EARLY_MOMENTUM_REVERSAL'));
-  assert.ok(PaperTrade.schema.indexes().some(([, options]) =>
-    options.name === 'one_open_paper_trade_per_account'
+  assert.ok(PaperTrade.schema.indexes().some(([fields, options]) =>
+    fields.symbol === 1
     && options.unique
     && options.partialFilterExpression.status === 'OPEN'));
+  assert.ok(!PaperTrade.schema.indexes().some(([, options]) =>
+    options.name === 'one_open_paper_trade_per_account'));
 });
 
 test('TP1 transaction realizes half the position, returns proportional margin, and buffers the stop', async () => {
@@ -339,6 +341,67 @@ test('opening a position reserves its entry fee from available margin immediatel
     PaperTrade.findOne = originals.findOne;
     VirtualWallet.findOneAndUpdate = originals.findOneAndUpdate;
     PaperTrade.create = originals.create;
+    global.fetch = originals.fetch;
+  }
+});
+
+test('scanner opens every qualifying symbol in the same candle scan', async () => {
+  const originals = {
+    findById: VirtualWallet.findById,
+    exists: PaperTrade.exists,
+    fetch: global.fetch,
+  };
+  const interval = '15m';
+  const intervalMs = INTERVAL_MS[interval];
+  const candleOpenTime = Math.floor(Date.now() / intervalMs) * intervalMs - intervalMs;
+  const openedSymbols = [];
+  VirtualWallet.findById = async () => ({ balance: 10_000, availableMargin: 10_000 });
+  PaperTrade.exists = async () => {
+    throw new Error('scanner must not block entries because another symbol is open');
+  };
+  global.fetch = async () => ({ ok: true, status: 200 });
+  try {
+    const engine = new PaperTradingEngine({ logger: { info() {}, warn() {}, error() {} } });
+    engine.enabled = true;
+    engine.dailyLossLimitReached = async () => false;
+    engine.dailyConsecutiveLossLimitReached = async () => false;
+    engine.isSymbolCoolingDown = async () => false;
+    engine.refreshExecutionBook = async () => ({
+      bids: Array.from({ length: 20 }, (_, index) => ({ price: 99 - index, quantity: 3 })),
+      asks: Array.from({ length: 20 }, (_, index) => ({ price: 101 + index, quantity: 1 })),
+      bestBid: 99,
+      bestAsk: 101,
+      bidQuantity: 60,
+      askQuantity: 20,
+      updatedAt: new Date(),
+    });
+    engine.openTrade = async (trade) => {
+      openedSymbols.push(trade.symbol);
+      return trade;
+    };
+    for (const symbol of SYMBOLS) {
+      engine.candleHistories.get(interval).set(symbol, Array.from({ length: 500 }, (_, index) => {
+        const openTime = candleOpenTime - (499 - index) * intervalMs;
+        const close = 100 + index * 0.1;
+        return {
+          time: new Date(openTime),
+          openTime,
+          closeTime: openTime + intervalMs - 1,
+          open: close - 0.05,
+          high: close + 10,
+          low: close - 10,
+          close,
+          volume: index === 499 ? 200 : 100,
+          isFinal: true,
+        };
+      }));
+    }
+
+    await engine.scanMarketsForEntry(candleOpenTime, interval);
+    assert.deepEqual(openedSymbols, SYMBOLS);
+  } finally {
+    VirtualWallet.findById = originals.findById;
+    PaperTrade.exists = originals.exists;
     global.fetch = originals.fetch;
   }
 });
