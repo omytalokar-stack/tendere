@@ -69,7 +69,7 @@ Render (Node.js/Express)
   - `BotState.js`: persistent enabled/paused state.
   - `VirtualWallet.js`: virtual balance, margin and realized P&L.
   - `PaperTrade.js`: open/closed simulated trades and execution/analysis fields.
-- The trade schema has a unique partial index limiting each symbol to one open position; different symbols can be open at the same time if available margin permits. Startup removes the legacy account-wide index. Wallet/trade opens and closes use MongoDB transactions, so use an Atlas replica set.
+- The trade schema has a unique partial index limiting each symbol to one open position and the scanner caps concurrent positions at three. Startup removes the legacy account-wide index. Wallet/trade opens and closes use MongoDB transactions, so use an Atlas replica set.
 
 ## 4. Binance market data and real-data checks
 
@@ -114,11 +114,12 @@ A new entry is considered only when:
 - The bot's persisted enabled flag is true.
 - All six markets are ready and their completed candle closes align.
 - For a 5-minute entry, the same symbol also has a qualifying 15-minute signal in the same direction; 15-minute entries continue to use their own qualifying signal.
-- There is no open position anywhere in the account.
+- Fewer than three positions are open across the account, with no existing open position for that symbol.
 - The daily realized-loss limit has not been reached.
 - The symbol is not in its post-loss cooldown.
 - Fresh Binance order-book data is available.
-- At least 5 directional votes align for the same direction.
+- At least 7 directional votes align, ADX-14 is at least 22, and close/EMA20/EMA50 are strictly aligned for the same direction.
+- The close is on the correct side of EMA-200.
 - Current closed-candle volume is at least 1.2 times the previous 20-candle mean.
 - Matching side of top-20 order-book quantity is at least 54%.
 
@@ -126,12 +127,12 @@ The current vote display can show a majority without an entry signal: all gates 
 
 ### Position size and simulated fills
 
-- Default planned risk budget: 1% of current virtual wallet balance per trade.
-- Quantity formula: `(wallet balance * 0.01) / abs(entry price - stop price)`.
+- Default planned risk budget: 0.75% of current virtual wallet balance per trade, with at most three concurrent positions.
+- Quantity formula: `(wallet balance * 0.0075) / abs(entry price - stop price)`.
 - Default leverage: 1x; configurable limit is 1x–5x. Leverage changes margin required, not the risk-budget formula.
 - Stop distance: 1.5 × ATR.
-- Default target: 2 × stop distance (2:1 reward/risk).
-- When price reaches +1R, the simulated stop moves to entry (breakeven); the initial stop remains recorded for the R calculation.
+- Partial target: +1.3R closes half the initial quantity; the remaining target is +2.5R.
+- At +1R, the stop moves to fee-adjusted breakeven (entry plus/minus 0.35%). After partial take-profit, the remaining stop locks at least +0.6R and trails by 0.75 ATR above +1.8R; the initial stop remains recorded for the R calculation.
 - Entry uses best ask for LONG or best bid for SHORT; exit uses best bid for LONG or best ask for SHORT.
 - The simulated execution price includes 0.075% adverse slippage per fill and a 0.075% taker fee per fill.
 - Entry is skipped if required margin plus entry fee exceeds available margin.
@@ -143,9 +144,10 @@ The current vote display can show a majority without an entry signal: all gates 
 - The close is simulated only when a fresh execution book is available; backend does not invent a fill if the quote is stale.
 - An opposing qualified momentum signal can close early.
 - A net-losing stop applies a 3-candle cooldown (45 minutes at 15m interval) to that symbol and records indicator/volume feedback.
+- Two consecutive net-losing closes for one symbol within 12 hours extend that symbol's cooldown to six hours.
 - Daily realized losses aggregate UTC-day closed losing paper trades. Default limit is 400 USDT; it blocks new entries, not monitoring/closing existing positions.
 - Two consecutive closed losing trades during the same UTC day pause new entries until the next UTC day by default (`DAILY_CONSECUTIVE_LOSS_LIMIT=2`). Once triggered, the breaker remains latched for that day; it is calculated from persisted closed trades, so a process restart does not reset it.
-- Multiple qualified symbols can open positions during the same scan, bounded by available wallet margin; each symbol is protected by a MongoDB unique partial index.
+- Up to three qualified symbols can open positions during the same scan, bounded by available wallet margin; each symbol is protected by a MongoDB unique partial index.
 
 ## 6. API endpoints
 
@@ -186,7 +188,8 @@ Error codes such as `DATA_FEED_OFFLINE`, `INSUFFICIENT_HISTORICAL_DATA`, and `OR
   - `INITIAL_BALANCE_USDT`: default 10000.
   - `CANDLE_INTERVAL`: default `15m`.
   - `PAPER_LEVERAGE`: default 1, allowed 1–5.
-  - `REWARD_RISK_RATIO`: default 2, allowed 1–10.
+  - `MAX_OPEN_TRADES`: default and maximum 3 concurrent positions.
+  - Runner target is fixed at +2.5R.
   - `DAILY_LOSS_LIMIT_USDT`: default 400.
   - `DAILY_CONSECUTIVE_LOSS_LIMIT`: default 2 consecutive closed losses per UTC day.
   - `NTFY_TOPIC`: ntfy.sh topic for backend trade/circuit-breaker alerts; defaults to `auraalgo_live_897k3_rajesh`. Use a long random topic and keep it private because anyone who knows it can subscribe or publish.

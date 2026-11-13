@@ -18,30 +18,30 @@ test('analysis refuses to calculate from fewer than 250 finalized candles', () =
   );
 });
 
-test('position sizing uses exactly one percent of wallet balance at the stop', () => {
+test('position sizing risks 0.75 percent of wallet balance at the stop', () => {
   const size = sizePosition({
     balance: 10_000,
     entryPrice: 100,
     stopLoss: 95,
     leverage: 1,
   });
-  assert.equal(RISK_PERCENT, 1);
-  assert.equal(size.riskBudgetUsd, 100);
-  assert.equal(size.quantity, 20);
-  assert.equal(size.margin, 2_000);
-  assert.equal(size.maxRiskUsd, 100);
+  assert.equal(RISK_PERCENT, 0.75);
+  assert.equal(size.riskBudgetUsd, 75);
+  assert.equal(size.quantity, 15);
+  assert.equal(size.margin, 1_500);
+  assert.equal(size.maxRiskUsd, 75);
 });
 
-test('leverage changes required margin without changing the one-percent risk amount', () => {
+test('leverage changes required margin without changing the 0.75-percent risk amount', () => {
   const size = sizePosition({
     balance: 10_000,
     entryPrice: 100,
     stopLoss: 99,
     leverage: 5,
   });
-  assert.equal(size.quantity, 100);
-  assert.equal(size.margin, 2_000);
-  assert.equal(size.maxRiskUsd, 100);
+  assert.equal(size.quantity, 75);
+  assert.equal(size.margin, 1_500);
+  assert.equal(size.maxRiskUsd, 75);
 });
 
 test('position sizing rejects zero-distance stop losses', () => {
@@ -62,17 +62,33 @@ test('position sizing rejects non-positive stop prices', () => {
   }), /Invalid inputs/);
 });
 
-test('entry requires seven aligned votes, EMA-200 direction, volume at least 1.2x, and 54% book pressure', () => {
+test('entry requires ADX 22, strict EMA trend alignment, seven votes, volume, and book pressure', () => {
   const analysis = {
     buyVotes: 7,
     sellVotes: 2,
     volumeRatio: 1.2,
-    currentPrice: 101,
+    currentPrice: 103,
+    ema20: 102,
+    ema50: 101,
     ema200: 100,
+    adx: 22,
     orderBookPressure: { bidPercent: 54, askPercent: 46 },
   };
   assert.equal(MIN_ENTRY_VOTES, 7);
   assert.equal(getEntrySignal(analysis), 'LONG');
+  assert.equal(getEntrySignal({
+    ...analysis,
+    adx: 21.99,
+  }), null);
+  assert.equal(getEntrySignal({
+    ...analysis,
+    currentPrice: 102,
+  }), null);
+  assert.equal(getEntrySignal({
+    ...analysis,
+    ema20: 101,
+    ema50: 102,
+  }), null);
   assert.equal(getEntrySignal({
     ...analysis,
     orderBookPressure: { bidPercent: 53.99, askPercent: 46.01 },
@@ -89,16 +105,22 @@ test('entry requires seven aligned votes, EMA-200 direction, volume at least 1.2
     buyVotes: 2,
     sellVotes: 7,
     volumeRatio: 1.2,
-    currentPrice: 99,
+    currentPrice: 97,
+    ema20: 98,
+    ema50: 99,
     ema200: 100,
+    adx: 22,
     orderBookPressure: { bidPercent: 46, askPercent: 54 },
   }), 'SHORT');
   assert.equal(getEntrySignal({
     buyVotes: 2,
     sellVotes: 7,
     volumeRatio: 1.2,
-    currentPrice: 100,
+    currentPrice: 99,
+    ema20: 98,
+    ema50: 99,
     ema200: 100,
+    adx: 22,
     orderBookPressure: { bidPercent: 46, askPercent: 54 },
   }), null);
 });
@@ -108,16 +130,22 @@ test('five-minute entries require the fifteen-minute signal to confirm the same 
     buyVotes: 7,
     sellVotes: 2,
     volumeRatio: 1.2,
-    currentPrice: 101,
+    currentPrice: 103,
+    ema20: 102,
+    ema50: 101,
     ema200: 100,
+    adx: 22,
     orderBookPressure: { bidPercent: 54, askPercent: 46 },
   };
   const short = {
     buyVotes: 2,
     sellVotes: 7,
     volumeRatio: 1.2,
-    currentPrice: 99,
+    currentPrice: 97,
+    ema20: 98,
+    ema50: 99,
     ema200: 100,
+    adx: 22,
     orderBookPressure: { bidPercent: 46, askPercent: 54 },
   };
   assert.equal(getConfirmedEntrySignal(long, long), 'LONG');

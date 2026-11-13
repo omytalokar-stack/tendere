@@ -295,7 +295,9 @@ test('418 pauses REST bootstrap until the ban expires, then restores history whi
     assert.equal(feed.restIpBanned, true);
     assert.ok(loggedMessages.some((message) => message.includes('waiting for the ban to expire')));
 
-    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    const retryWaitMs = 1_100
+      + SYMBOLS.length * config.entryIntervals.length * BinanceFeed.REST_REQUEST_INTERVAL_MS;
+    await new Promise((resolve) => setTimeout(resolve, retryWaitMs));
     assert.ok(
       requests >= SYMBOLS.length * config.entryIntervals.length
         && requests <= SYMBOLS.length * config.entryIntervals.length + 1,

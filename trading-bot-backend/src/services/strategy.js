@@ -10,7 +10,7 @@ const {
 const MIN_CANDLES = 250;
 const SUPER_TREND_PERIOD = 10;
 const SUPER_TREND_MULTIPLIER = 3;
-const RISK_PERCENT = 1;
+const RISK_PERCENT = 0.75;
 const MIN_ENTRY_VOTES = 7;
 const MIN_ENTRY_VOLUME_RATIO = 1.2;
 const MIN_ORDER_BOOK_PRESSURE_PERCENT = 54;
@@ -77,12 +77,20 @@ function calculateSupertrend(candles) {
 
 function getEntrySignal(analysis) {
   if (!analysis || !Number.isFinite(analysis.volumeRatio)
-    || analysis.volumeRatio < MIN_ENTRY_VOLUME_RATIO) return null;
+    || analysis.volumeRatio < MIN_ENTRY_VOLUME_RATIO
+    || !Number.isFinite(analysis.adx)
+    || analysis.adx < 22
+    || !Number.isFinite(analysis.ema20)
+    || !Number.isFinite(analysis.ema50)) return null;
 
   if (analysis.buyVotes >= MIN_ENTRY_VOTES
+    && analysis.currentPrice > analysis.ema20
+    && analysis.ema20 > analysis.ema50
     && analysis.currentPrice > analysis.ema200
     && analysis.orderBookPressure?.bidPercent >= MIN_ORDER_BOOK_PRESSURE_PERCENT) return 'LONG';
   if (analysis.sellVotes >= MIN_ENTRY_VOTES
+    && analysis.currentPrice < analysis.ema20
+    && analysis.ema20 < analysis.ema50
     && analysis.currentPrice < analysis.ema200
     && analysis.orderBookPressure?.askPercent >= MIN_ORDER_BOOK_PRESSURE_PERCENT) return 'SHORT';
   return null;
@@ -168,6 +176,8 @@ function analyzeCandles(candles, orderBook) {
     sellVotes,
     totalVotes: votes.length,
     currentPrice: currentClose,
+    ema20,
+    ema50,
     ema200,
     atr,
     rsi,

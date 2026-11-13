@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const mongoose = require('mongoose');
 const { config, SYMBOLS } = require('../src/config');
+const BotState = require('../src/models/BotState');
 const PaperTrade = require('../src/models/PaperTrade');
 const VirtualWallet = require('../src/models/VirtualWallet');
 const PaperTradingEngine = require('../src/services/paperTradingEngine');
@@ -21,6 +22,13 @@ test('virtual wallet defaults to the configured paper balance', () => {
   assert.equal(wallet.totalRealizedPnl, 0);
   assert.equal(wallet.winCount, 0);
   assert.equal(wallet.lossCount, 0);
+});
+
+test('a fresh bot state defaults to enabled unless configuration explicitly disables it', () => {
+  const state = new BotState();
+  assert.equal(state.enabled, config.botEnabled);
+  assert.equal(config.botEnabled, (process.env.BOT_ENABLED || 'true').toLowerCase() !== 'false');
+  assert.equal(config.maxOpenTrades, 3);
 });
 
 test('a closed candle crossing both thresholds classifies stop-loss first', () => {
@@ -80,6 +88,175 @@ test('TP1, TP2, and buffered stop-loss trigger the correct long and short exits'
     high: 99.65,
     low: 98,
   }), { reason: 'STOP_LOSS' });
+});
+
+test('one R moves both long and short stops to fee-adjusted breakeven', async () => {
+  const originalUpdate = PaperTrade.findOneAndUpdate;
+  const updates = [];
+  const trades = new Map();
+  PaperTrade.findOneAndUpdate = async (filter, update) => {
+    updates.push(update);
+    const trade = trades.get(filter._id);
+    const operation = update.$max || update.$min;
+    for (const [field, value] of Object.entries(operation)) {
+      trade[field] = update.$max
+        ? Math.max(Number(trade[field] ?? -Infinity), value)
+        : Math.min(Number(trade[field] ?? Infinity), value);
+    }
+    return trade;
+  };
+  try {
+    const engine = new PaperTradingEngine({ logger: { info() {}, warn() {}, error() {} } });
+    const long = {
+      _id: 'long-trade',
+      side: 'LONG',
+      entryPrice: 100,
+      initialStopLoss: 95,
+      stopLoss: 95,
+      highestPrice: 100,
+      atr: 5 / 1.5,
+    };
+    const short = {
+      _id: 'short-trade',
+      side: 'SHORT',
+      entryPrice: 100,
+      initialStopLoss: 105,
+      stopLoss: 105,
+      lowestPrice: 100,
+      atr: 5 / 1.5,
+    };
+    trades.set(long._id, long);
+    trades.set(short._id, short);
+
+    await engine.updateTradeProtection(long, { high: 105, low: 104 });
+    await engine.updateTradeProtection(short, { high: 96, low: 95 });
+    assert.equal(long.stopLoss, 100.35);
+    assert.equal(short.stopLoss, 99.65);
+    assert.deepEqual(updates[0].$max, { highestPrice: 105, stopLoss: 100.35 });
+    assert.deepEqual(updates[1].$min, { lowestPrice: 95, stopLoss: 99.65 });
+  } finally {
+    PaperTrade.findOneAndUpdate = originalUpdate;
+  }
+});
+
+test('partial profit triggers at +1.3R and trails the runner by 0.75 ATR after +1.8R', async () => {
+  const originalUpdate = PaperTrade.findOneAndUpdate;
+  const updates = [];
+  const trades = new Map();
+  PaperTrade.findOneAndUpdate = async (filter, update) => {
+    updates.push(update);
+    const trade = trades.get(filter._id);
+    const operation = update.$max || update.$min;
+    for (const [field, value] of Object.entries(operation)) {
+      trade[field] = update.$max
+        ? Math.max(Number(trade[field] ?? -Infinity), value)
+        : Math.min(Number(trade[field] ?? Infinity), value);
+    }
+    return trade;
+  };
+  try {
+    const engine = new PaperTradingEngine({ logger: { info() {}, warn() {}, error() {} } });
+    const beforePartial = {
+      _id: 'partial-trade',
+      side: 'LONG',
+      entryPrice: 100,
+      initialStopLoss: 95,
+      stopLoss: 95,
+      highestPrice: 100,
+      atr: 5 / 1.5,
+      tp1Price: 106.5,
+      tp2Price: 112.5,
+      tp1Filled: false,
+    };
+    trades.set(beforePartial._id, beforePartial);
+    const partialExit = await engine.getManagedExit(beforePartial, { high: 106.5, low: 102 });
+    assert.deepEqual(partialExit, { reason: 'PARTIAL_TP1_FILLED' });
+    assert.equal(beforePartial.stopLoss, 100.35);
+
+    const runner = {
+      ...beforePartial,
+      _id: 'runner-trade',
+      stopLoss: 103,
+      highestPrice: 106.5,
+      atr: 3,
+      tp1Filled: true,
+    };
+    trades.set(runner._id, runner);
+    await engine.updateTradeProtection(runner, { high: 110, low: 109 });
+    assert.equal(runner.stopLoss, 107.75);
+    assert.deepEqual(updates[1].$max, { highestPrice: 110, stopLoss: 107.75 });
+
+    const stopExit = await engine.getManagedExit(runner, { high: 109, low: 107.75 });
+    assert.deepEqual(stopExit, { reason: 'STOP_LOSS' });
+
+    const shortRunner = {
+      ...runner,
+      _id: 'short-runner',
+      side: 'SHORT',
+      initialStopLoss: 105,
+      stopLoss: 97,
+      highestPrice: 100,
+      lowestPrice: 93.5,
+      tp2Price: 87.5,
+    };
+    trades.set(shortRunner._id, shortRunner);
+    await engine.updateTradeProtection(shortRunner, { high: 91, low: 90.5 });
+    assert.equal(shortRunner.stopLoss, 92.75);
+    assert.deepEqual(updates[2].$min, { lowestPrice: 90.5, stopLoss: 92.75 });
+  } finally {
+    PaperTrade.findOneAndUpdate = originalUpdate;
+  }
+});
+
+test('two consecutive recent symbol losses persist a six-hour cooldown', async () => {
+  const originals = {
+    findOne: PaperTrade.findOne,
+    find: PaperTrade.find,
+    updateOne: PaperTrade.updateOne,
+  };
+  const latestClosedAt = new Date(Date.now() - 10 * 60_000);
+  let recentTrades = [
+    { _id: 'latest-loss', pnlUsd: -2, closedAt: latestClosedAt },
+    { _id: 'prior-loss', pnlUsd: -1, closedAt: new Date(latestClosedAt.getTime() - 60 * 60_000) },
+  ];
+  let query;
+  let cooldownUpdate;
+  PaperTrade.findOne = () => ({
+    select: () => ({ sort: () => ({ lean: async () => null }) }),
+  });
+  PaperTrade.find = (filter) => {
+    query = filter;
+    return {
+      select: () => ({
+        sort: () => ({
+          limit: () => ({ lean: async () => recentTrades }),
+        }),
+      }),
+    };
+  };
+  PaperTrade.updateOne = async (filter, update) => {
+    cooldownUpdate = { filter, update };
+    return { matchedCount: 1 };
+  };
+  try {
+    const engine = new PaperTradingEngine({ logger: { info() {}, warn() {}, error() {} } });
+    assert.equal(await engine.isSymbolCoolingDown('ETHUSDT'), true);
+    assert.equal(query.symbol, 'ETHUSDT');
+    assert.equal(query.status, 'CLOSED');
+    assert.ok(query.closedAt.$gte.getTime() > Date.now() - 12 * 60 * 60_000 - 1000);
+    assert.deepEqual(cooldownUpdate.filter, { _id: 'latest-loss', status: 'CLOSED' });
+    assert.equal(
+      cooldownUpdate.update.$max.cooldownUntil.getTime() - latestClosedAt.getTime(),
+      PaperTradingEngine.SYMBOL_LOSING_STREAK_COOLDOWN,
+    );
+
+    recentTrades = [recentTrades[0], { ...recentTrades[1], pnlUsd: 1 }];
+    assert.equal(await engine.isSymbolCoolingDown('ETHUSDT'), false);
+  } finally {
+    PaperTrade.findOne = originals.findOne;
+    PaperTrade.find = originals.find;
+    PaperTrade.updateOne = originals.updateOne;
+  }
 });
 
 test('fresh Binance depth keeps a quiet market ready and supplies a labeled midpoint quote', () => {
@@ -168,7 +345,7 @@ test('paper exits use a fresh Binance depth quote even when the last trade tick 
   assert.equal(result[3], 99);
 });
 
-test('paper trade schema persists fees, stop-loss feedback, and one open position per symbol', () => {
+test('paper trade schema persists protection state and one open position per symbol', () => {
   const trade = new PaperTrade();
   assert.equal(trade.entryFeeUsd, 0);
   assert.equal(trade.exitFeeUsd, 0);
@@ -177,7 +354,10 @@ test('paper trade schema persists fees, stop-loss feedback, and one open positio
   assert.equal(trade.cooldownUntil, null);
   assert.equal(trade.tp1Filled, false);
   assert.equal(trade.realizedPnl, 0);
-  for (const field of ['initialQuantity', 'remainingQuantity', 'tp1Price', 'tp2Price']) {
+  for (const field of [
+    'initialQuantity', 'remainingQuantity', 'tp1Price', 'tp2Price',
+    'atr', 'highestPrice', 'lowestPrice',
+  ]) {
     assert.ok(PaperTrade.schema.path(field));
   }
   assert.ok(PaperTrade.schema.path('closeReason').enumValues.includes('EARLY_MOMENTUM_REVERSAL'));
@@ -189,7 +369,7 @@ test('paper trade schema persists fees, stop-loss feedback, and one open positio
     options.name === 'one_open_paper_trade_per_account'));
 });
 
-test('TP1 transaction realizes half the position, returns proportional margin, and buffers the stop', async () => {
+test('partial take-profit realizes half, returns proportional margin, and locks at least +0.6R', async () => {
   const originals = {
     startSession: mongoose.startSession,
     findOne: PaperTrade.findOne,
@@ -203,6 +383,8 @@ test('TP1 transaction realizes half the position, returns proportional margin, a
     side: 'LONG',
     status: 'OPEN',
     entryPrice: 100,
+    initialStopLoss: 95,
+    stopLoss: 95,
     entryFeeUsd: 0.15,
     exitFeeUsd: 0,
     totalFeesUsd: 0.15,
@@ -244,7 +426,7 @@ test('TP1 transaction realizes half the position, returns proportional margin, a
     assert.equal(partial.isPartialTp1, true);
     assert.equal(partial.realizedPnlUsd, 4.84625);
     assert.equal(partial.feesDeductedUsd, 0.15375);
-    assert.equal(partial.stopLoss, 100.35);
+    assert.equal(partial.stopLoss, 103);
     assert.equal(tradeFilter.tp1Filled.$ne, true);
     assert.equal(tradeUpdate.$set.tp1Filled, true);
     assert.equal(tradeUpdate.$set.remainingQuantity, 1);
@@ -256,15 +438,15 @@ test('TP1 transaction realizes half the position, returns proportional margin, a
     assert.equal(walletUpdate.$inc.lossCount, 0);
     assert.match(engine.getAuditLog()[0].message, /PARTIAL_TP1_FILLED/);
     assert.match(engine.getAuditLog()[0].message, /fees deducted 0\.15375000 USDT/);
-    assert.match(engine.getAuditLog()[0].message, /new stop-loss 100\.35/);
+    assert.match(engine.getAuditLog()[0].message, /new stop-loss 103/);
 
-    const closed = await engine.closeTrade(trade._id, 100.35, 'STOP_LOSS', 100.35);
-    assert.equal(closed.pnlUsd, 5.0459875);
-    assert.equal(tradeUpdate.$set.realizedPnl, 5.0459875);
-    assert.equal(tradeUpdate.$set.totalFeesUsd, 0.3040125);
+    const closed = await engine.closeTrade(trade._id, 103, 'STOP_LOSS', 103);
+    assert.equal(closed.pnlUsd, 7.694);
+    assert.equal(tradeUpdate.$set.realizedPnl, 7.694);
+    assert.equal(tradeUpdate.$set.totalFeesUsd, 0.306);
     assert.equal(tradeUpdate.$set.remainingQuantity, 0);
-    assert.equal(walletUpdate.$inc.balance, 0.1997375);
-    assert.equal(walletUpdate.$inc.totalRealizedPnl, 0.1997375);
+    assert.equal(walletUpdate.$inc.balance, 2.84775);
+    assert.equal(walletUpdate.$inc.totalRealizedPnl, 2.84775);
     assert.equal(walletUpdate.$inc.inTradeMargin, -250);
     assert.equal(walletUpdate.$inc.winCount, 1);
     assert.equal(walletUpdate.$inc.lossCount, 0);
@@ -295,6 +477,7 @@ test('opening a position reserves its entry fee from available margin immediatel
   const originals = {
     startSession: mongoose.startSession,
     findOne: PaperTrade.findOne,
+    countDocuments: PaperTrade.countDocuments,
     findOneAndUpdate: VirtualWallet.findOneAndUpdate,
     create: PaperTrade.create,
     fetch: global.fetch,
@@ -306,6 +489,7 @@ test('opening a position reserves its entry fee from available margin immediatel
     endSession: async () => {},
   });
   PaperTrade.findOne = () => ({ session: async () => null });
+  PaperTrade.countDocuments = () => ({ session: async () => 0 });
   global.fetch = async (url, options) => {
     notificationRequest = { url, options };
     return { ok: true, status: 200 };
@@ -339,26 +523,54 @@ test('opening a position reserves its entry fee from available margin immediatel
   } finally {
     mongoose.startSession = originals.startSession;
     PaperTrade.findOne = originals.findOne;
+    PaperTrade.countDocuments = originals.countDocuments;
     VirtualWallet.findOneAndUpdate = originals.findOneAndUpdate;
     PaperTrade.create = originals.create;
     global.fetch = originals.fetch;
   }
 });
 
-test('scanner opens every qualifying symbol in the same candle scan', async () => {
+test('transactional trade opening refuses to exceed the configured concurrent-position cap', async () => {
+  const originals = {
+    startSession: mongoose.startSession,
+    findOne: PaperTrade.findOne,
+    countDocuments: PaperTrade.countDocuments,
+  };
+  mongoose.startSession = async () => ({
+    withTransaction: async (operation) => operation(),
+    endSession: async () => {},
+  });
+  PaperTrade.findOne = () => ({ session: async () => null });
+  PaperTrade.countDocuments = () => ({ session: async () => config.maxOpenTrades });
+  try {
+    const engine = new PaperTradingEngine({ logger: { info() {}, warn() {}, error() {} } });
+    const opened = await engine.openTrade({
+      symbol: 'ETHUSDT',
+      side: 'LONG',
+      margin: 100,
+      entryFeeUsd: 1,
+    });
+    assert.equal(opened, null);
+  } finally {
+    mongoose.startSession = originals.startSession;
+    PaperTrade.findOne = originals.findOne;
+    PaperTrade.countDocuments = originals.countDocuments;
+  }
+});
+
+test('scanner opens at most three qualifying symbols in one candle scan', async () => {
   const originals = {
     findById: VirtualWallet.findById,
-    exists: PaperTrade.exists,
+    countDocuments: PaperTrade.countDocuments,
     fetch: global.fetch,
   };
   const interval = '15m';
   const intervalMs = INTERVAL_MS[interval];
   const candleOpenTime = Math.floor(Date.now() / intervalMs) * intervalMs - intervalMs;
   const openedSymbols = [];
+  const openedTrades = [];
   VirtualWallet.findById = async () => ({ balance: 10_000, availableMargin: 10_000 });
-  PaperTrade.exists = async () => {
-    throw new Error('scanner must not block entries because another symbol is open');
-  };
+  PaperTrade.countDocuments = async () => 0;
   global.fetch = async () => ({ ok: true, status: 200 });
   try {
     const engine = new PaperTradingEngine({ logger: { info() {}, warn() {}, error() {} } });
@@ -377,6 +589,7 @@ test('scanner opens every qualifying symbol in the same candle scan', async () =
     });
     engine.openTrade = async (trade) => {
       openedSymbols.push(trade.symbol);
+      openedTrades.push(trade);
       return trade;
     };
     for (const symbol of SYMBOLS) {
@@ -398,10 +611,14 @@ test('scanner opens every qualifying symbol in the same candle scan', async () =
     }
 
     await engine.scanMarketsForEntry(candleOpenTime, interval);
-    assert.deepEqual(openedSymbols, SYMBOLS);
+    assert.deepEqual(openedSymbols, SYMBOLS.slice(0, config.maxOpenTrades));
+    const firstTrade = openedTrades[0];
+    const riskDistance = firstTrade.entryPrice - firstTrade.initialStopLoss;
+    assert.ok(Math.abs((firstTrade.tp1Price - firstTrade.entryPrice) / riskDistance - 1.3) < 1e-8);
+    assert.ok(Math.abs((firstTrade.tp2Price - firstTrade.entryPrice) / riskDistance - 2.5) < 1e-8);
   } finally {
     VirtualWallet.findById = originals.findById;
-    PaperTrade.exists = originals.exists;
+    PaperTrade.countDocuments = originals.countDocuments;
     global.fetch = originals.fetch;
   }
 });

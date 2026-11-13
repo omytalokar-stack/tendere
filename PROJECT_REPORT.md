@@ -96,10 +96,10 @@ Direction tabhi qualify karti hai jab ye sab lagu conditions poori hon:
 
 1. Bot enabled ho, Binance feed connected ho aur market data ready ho.
 2. Us interval mein sabhi 6 symbols ki 500-candle histories complete hon aur unki latest closed candle ka timestamp scan ke liye align ho.
-3. Ek hi waqt mein account mein koi open position na ho.
+3. Open positions ki tadaad configured maximum (`MAX_OPEN_TRADES`, default 3) se kam ho; har symbol par ek hi open position ho sakti hai.
 4. UTC din ke realized losing P&L ka sum configured limit tak na pahuncha ho (default `400 USDT`).
 5. Symbol kisi net-losing stop ke baad cooldown mein na ho.
-6. Kam-se-kam **5 directional votes** ek hi taraf hon.
+6. Kam-se-kam **7 directional votes** ek hi taraf hon, ADX-14 `>= 22` ho, aur LONG ke liye `close > EMA20 > EMA50` ya SHORT ke liye `close < EMA20 < EMA50` ho.
 7. Current closed-candle volume prior 20 candles ke average ka **kam-se-kam 1.2×** ho.
 8. Top-20 book ke aggregate base-asset bid quantity ka hissa LONG ke liye `>= 54%`, ya ask quantity ka hissa SHORT ke liye `>= 54%` ho.
 9. Fresh order book ho.
@@ -115,13 +115,13 @@ Direction tabhi qualify karti hai jab ye sab lagu conditions poori hon:
 Default risk budget:
 
 ```text
-risk budget = current virtual wallet balance × 1%
+risk budget = current virtual wallet balance × 0.75%
 stop distance = ATR-14 × 1.5
 quantity = risk budget ÷ abs(entry price − stop price)
 margin = quantity × entry price ÷ leverage
 ```
 
-Leverage default `1x` hai, config range `1–5x`. Leverage margin requirement ko badalta hai, quantity formula ke 1% risk budget ko nahi. Entry tab skip hoti hai jab quantity invalid ho ya margin plus entry fee available margin se zyada ho.
+Leverage default `1x` hai, config range `1–5x`. Leverage margin requirement ko badalta hai, quantity formula ke 0.75% risk budget ko nahi. Entry tab skip hoti hai jab quantity invalid ho ya margin plus entry fee available margin se zyada ho.
 
 ### Entry/exit simulation
 
@@ -129,23 +129,25 @@ Leverage default `1x` hai, config range `1–5x`. Leverage margin requirement ko
 - LONG exit: best bid; SHORT exit: best ask.
 - Har fill par 0.075% adverse slippage simulation: BUY price upar aur SELL price neeche adjust hota hai.
 - Har fill par 0.075% taker fee lagti hai. Trade ka net P&L = gross P&L minus entry aur exit fees.
-- Target default `2 × stop distance` (2:1 planned reward/risk) par rakha jata hai.
-- Price +1R tak pahunchne par stop-loss ko entry price par move karke breakeven stop lagaya jata hai. Initial stop level trade record mein bana rehta hai, taaki +1R ka reference stable rahe.
+- +1R par stop-loss fee-adjusted breakeven par move hota hai: LONG ke liye `entryPrice * 1.0035`, SHORT ke liye `entryPrice * 0.9965`.
+- +1.3R par half initial quantity current bid/ask quote par partial close hoti hai. Remaining position ka stop kam-se-kam +0.6R lock karta hai.
+- +1.8R se aage remaining position ka stop LONG ke highest high se ya SHORT ke lowest low se 0.75 ATR trail karta hai; runner ka target +2.5R hai.
+- Initial stop level trade record mein bana rehta hai, taaki R calculation stable rahe.
 - Candle ke high/low se stop ya target touch detect hota hai, lekin trade actual simulated close **fresh order-book quote** par hota hai, stop/target price ko guaranteed fill maan kar nahi.
 - Agar ek candle mein stop aur target dono touch hon to stop-loss pehle maana jata hai.
 - Opposite direction ka qualifying signal existing position ko `EARLY_MOMENTUM_REVERSAL` se close kar sakta hai.
 - User manual close request kar sakta hai; uske liye fresh quote aur authorized control request zaroori hai.
 - Quote unavailable ho to close ko fabricated price par execute nahi kiya jata; pending exit ko baad ke live tick par dobara try kiya ja sakta hai.
 
-Planned 1% risk **maximum guaranteed loss nahi** hai. Slippage, fees, quote timing, candle gaps aur paper fill assumptions actual loss ko plan se alag kar sakte hain.
+Planned 0.75% risk **maximum guaranteed loss nahi** hai. Slippage, fees, quote timing, candle gaps aur paper fill assumptions actual loss ko plan se alag kar sakte hain.
 
 ### Wallet aur concurrency safety
 
 `VirtualWallet` mein balance, available margin, in-trade margin, realized P&L aur win/loss counts store hote hain. Entry par margin + entry fee reserve hote hain; close par margin/P&L/exit fee ke hisaab se wallet update hota hai.
 
-Entry/close wallet aur trade changes MongoDB transaction mein hote hain. Scanner ek scan mein har qualifying symbol ke liye entry ki koshish karta hai; available margin limits total positions, aur unique database index har symbol par ek hi open trade allow karta hai. Startup par purana account-wide index remove hota hai. Transactions ke liye MongoDB Atlas jaise replica-set environment ki zaroorat hoti hai.
+Entry/close wallet aur trade changes MongoDB transaction mein hote hain. Scanner ek scan mein qualifying symbols par entry ki koshish karta hai, lekin total concurrent positions teen se zyada nahi ho sakti; available margin aur unique database index har symbol par ek hi open trade enforce karte hain. Startup par purana account-wide index remove hota hai. Transactions ke liye MongoDB Atlas jaise replica-set environment ki zaroorat hoti hai.
 
-Net-losing STOP_LOSS ke baad us symbol ko 3 configured candle intervals ka cooldown lagta hai—default 15m interval par 45 minute. Default do consecutive losing closed trades ek UTC day mein hone par nayi entries agle UTC day tak rukti hain. Alag daily realized-loss cap (default 400 USDT) bhi nayi entries rokta hai; existing trade monitoring band nahi karta. Consecutive-loss count persisted closed trades se calculate hota hai, isliye backend restart se breaker reset nahi hota.
+Net-losing STOP_LOSS ke baad us symbol ko 3 configured candle intervals ka cooldown lagta hai—default 15m interval par 45 minute. Ek symbol ke do consecutive net-losing closed trades 12 ghante mein hone par us symbol ka cooldown 6 ghante tak extend hota hai. Default do consecutive losing closed trades ek UTC day mein hone par sabhi nayi entries agle UTC day tak rukti hain. Alag daily realized-loss cap (default 400 USDT) bhi nayi entries rokta hai; existing trade monitoring band nahi karta. Consecutive-loss count persisted closed trades se calculate hota hai, isliye backend restart se breaker reset nahi hota.
 
 ## 6. Database/model aur API surfaces
 
@@ -194,7 +196,8 @@ Backend defaults aur bounds [`trading-bot-backend/src/config.js`](./trading-bot-
 | `INITIAL_BALANCE_USDT` | Default `10000` virtual balance |
 | `CANDLE_INTERVAL` | Default `15m` |
 | `PAPER_LEVERAGE` | Default `1`, allowed `1–5` |
-| `REWARD_RISK_RATIO` | Default `2`, allowed `1–10` |
+| `MAX_OPEN_TRADES` | Default and maximum `3` concurrent positions |
+| Runner target | Fixed at `+2.5R` |
 | `DAILY_LOSS_LIMIT_USDT` | Default `400` |
 | `DAILY_CONSECUTIVE_LOSS_LIMIT` | Default `2` consecutive closed losses per UTC day |
 | `BINANCE_REST_URL` | Default public market-data host |
@@ -225,7 +228,7 @@ Frontend `http://localhost:3000` par aur backend default `3001` par chalta hai. 
 - Formal backtest, out-of-sample validation, benchmark, win-rate/profitability proof ya future performance forecast nahi.
 - Exchange par real buy/sell order, real account balance, real short borrowing, funding/borrow fee ya exchange order lifecycle nahi.
 - Har indicator independent vote nahi: indicators correlated ho sakte hain aur fixed vote count probability/confidence score nahi hota.
-- “1% risk” guarantee nahi; gap/fees/slippage/simulation assumptions se actual simulated loss alag ho sakta hai.
+- “0.75% risk” guarantee nahi; gap/fees/slippage/simulation assumptions se actual simulated loss alag ho sakta hai.
 
 Isliye ise **market-data-driven paper-trading demo/strategy simulator** samjhein, verified profitable trading system ya financial advice nahi.
 

@@ -20,7 +20,10 @@ const {
 } = require('./notificationAlerts');
 const TAKER_SLIPPAGE_RATE = 0.00075;
 const TAKER_FEE_RATE = 0.00075;
+const RUNNER_TARGET_R_MULTIPLE = 2.5;
 const COOLDOWN_CANDLES = 3;
+const SYMBOL_LOSING_STREAK_LOOKBACK_MS = 12 * 60 * 60 * 1000;
+const SYMBOL_LOSING_STREAK_COOLDOWN = 6 * 60 * 60 * 1000;
 const MAX_MARKET_DATA_AGE_MS = 15_000;
 const CANDLE_INTERVAL_MS = {
   '1m': 60_000, '3m': 180_000, '5m': 300_000, '15m': 900_000,
@@ -153,7 +156,7 @@ class PaperTradingEngine {
       interval: config.candleInterval,
       entryIntervals: config.entryIntervals,
       riskPercent: RISK_PERCENT,
-      rewardRiskRatio: config.rewardRiskRatio,
+      rewardRiskRatio: RUNNER_TARGET_R_MULTIPLE,
       leverage: config.leverage,
       dailyLossLimit: config.dailyLossLimit,
       dailyConsecutiveLossLimit: config.dailyConsecutiveLossLimit,
@@ -198,7 +201,7 @@ class PaperTradingEngine {
 
       const openTrade = await PaperTrade.findOne({ symbol, status: 'OPEN' });
       if (interval === config.candleInterval && openTrade && candle.isFinal !== true) {
-        const exit = this.getExit(openTrade, candle);
+        const exit = await this.getManagedExit(openTrade, candle);
         if (exit) {
           this.pendingExits.set(symbol, exit.reason);
           const closed = await this.closeAtMarket(openTrade, exit.reason);
@@ -230,10 +233,15 @@ class PaperTradingEngine {
 
     if (historical && interval === config.candleInterval) {
       const openTrade = await PaperTrade.findOne({ symbol, status: 'OPEN' });
-      const historicalExit = openTrade && history
-        .filter((candle) => new Date(candle.time).getTime() > new Date(openTrade.openedAt).getTime())
-        .map((candle) => this.getExit(openTrade, candle))
-        .find(Boolean);
+      let historicalExit = null;
+      if (openTrade) {
+        const laterCandles = history
+          .filter((candle) => new Date(candle.time).getTime() > new Date(openTrade.openedAt).getTime());
+        for (const candle of laterCandles) {
+          historicalExit = await this.getManagedExit(openTrade, candle);
+          if (historicalExit) break;
+        }
+      }
       if (historicalExit) {
         this.pendingExits.set(symbol, historicalExit.reason);
       }
@@ -256,7 +264,7 @@ class PaperTradingEngine {
     const openTrade = await PaperTrade.findOne({ symbol, status: 'OPEN' });
     if (openTrade) {
       if (interval === config.candleInterval) {
-        let exit = this.getExit(openTrade, candle);
+        let exit = await this.getManagedExit(openTrade, candle);
         if (!exit) exit = await this.getMomentumReversal(openTrade, history);
         if (exit) {
           this.pendingExits.set(symbol, exit.reason);
@@ -303,10 +311,14 @@ class PaperTradingEngine {
       return;
     }
 
+    let openTradeCount = await PaperTrade.countDocuments({ status: 'OPEN' });
+    if (openTradeCount >= config.maxOpenTrades) return;
+
     const wallet = await VirtualWallet.findById('primary');
     if (!wallet) throw new Error('Virtual wallet has not been initialized');
 
     for (const symbol of SYMBOLS) {
+      if (openTradeCount >= config.maxOpenTrades) break;
       if (await this.isSymbolCoolingDown(symbol)) continue;
       const history = histories.get(symbol);
       const executionBook = await this.refreshExecutionBook(symbol);
@@ -329,11 +341,11 @@ class PaperTradingEngine {
         ? entryPrice - stopDistance
         : entryPrice + stopDistance;
       const tp1Price = direction === 'LONG'
-        ? entryPrice + analysis.atr * 1.5
-        : entryPrice - analysis.atr * 1.5;
+        ? entryPrice + stopDistance * 1.3
+        : entryPrice - stopDistance * 1.3;
       const tp2Price = direction === 'LONG'
-        ? entryPrice + analysis.atr * 3
-        : entryPrice - analysis.atr * 3;
+        ? entryPrice + stopDistance * RUNNER_TARGET_R_MULTIPLE
+        : entryPrice - stopDistance * RUNNER_TARGET_R_MULTIPLE;
       if (stopLoss <= 0 || tp1Price <= 0 || tp2Price <= 0) continue;
 
       const position = sizePosition({
@@ -347,12 +359,15 @@ class PaperTradingEngine {
         || position.margin + entryFeeUsd > wallet.availableMargin
         || position.quantity <= 0) continue;
 
-      await this.openTrade({
+      const openedTrade = await this.openTrade({
         symbol,
         side: direction,
         entryPrice,
         entryQuote: rawEntryQuote,
         initialStopLoss: stopLoss,
+        atr: analysis.atr,
+        highestPrice: entryPrice,
+        lowestPrice: entryPrice,
         executionCostUsd: round(Math.abs(entryPrice - rawEntryQuote) * position.quantity, 8),
         entryFeeUsd,
         exitFeeUsd: 0,
@@ -371,18 +386,39 @@ class PaperTradingEngine {
         strategy: `${interval}${confirmationAnalysis ? ' + 15m confirmed' : ''}: ${analysis.strategy} (${direction === 'LONG' ? analysis.buyVotes : analysis.sellVotes}/${analysis.totalVotes})`,
         openedAt: new Date(),
       });
+      if (openedTrade) openTradeCount += 1;
     }
   }
 
-  async isSymbolCoolingDown(symbol) {
-    const coolingTrade = await PaperTrade.findOne({
+  async isSymbolCoolingDown(symbol, now = new Date()) {
+    const recentTrades = await PaperTrade.find({
       symbol,
       status: 'CLOSED',
-      closeReason: 'STOP_LOSS',
-      pnlUsd: { $lt: 0 },
-      cooldownUntil: { $gt: new Date() },
-    }).sort({ closedAt: -1 }).lean();
-    return Boolean(coolingTrade);
+      closedAt: { $gte: new Date(now.getTime() - SYMBOL_LOSING_STREAK_LOOKBACK_MS) },
+    })
+      .select('_id pnlUsd closedAt')
+      .sort({ closedAt: -1 })
+      .limit(2)
+      .lean();
+    if (recentTrades.length >= 2 && recentTrades.every((trade) => trade.pnlUsd < 0)) {
+      const cooldownUntil = new Date(
+        new Date(recentTrades[0].closedAt).getTime() + SYMBOL_LOSING_STREAK_COOLDOWN,
+      );
+      if (cooldownUntil > now) {
+        await PaperTrade.updateOne(
+          { _id: recentTrades[0]._id, status: 'CLOSED' },
+          { $max: { cooldownUntil } },
+        );
+        return true;
+      }
+    }
+
+    const activeCooldown = await PaperTrade.findOne({
+      symbol,
+      status: 'CLOSED',
+      cooldownUntil: { $gt: now },
+    }).select('cooldownUntil').sort({ cooldownUntil: -1 }).lean();
+    return Boolean(activeCooldown);
   }
 
   async getMomentumReversal(trade, history) {
@@ -471,6 +507,80 @@ class PaperTradingEngine {
       }
     }
     return null;
+  }
+
+  async getManagedExit(trade, candle) {
+    const exitBeforeProtection = this.getExit(trade, candle);
+    if (exitBeforeProtection?.reason === 'STOP_LOSS') return exitBeforeProtection;
+
+    const protectedTrade = await this.updateTradeProtection(trade, candle);
+    return protectedTrade ? this.getExit(protectedTrade, candle) : null;
+  }
+
+  async updateTradeProtection(trade, candle) {
+    const entryPrice = Number(trade.entryPrice);
+    const initialStopLoss = Number(trade.initialStopLoss ?? trade.stopLoss);
+    const riskDistance = Math.abs(entryPrice - initialStopLoss);
+    if (!Number.isFinite(entryPrice) || !Number.isFinite(riskDistance) || riskDistance <= 0) {
+      return trade;
+    }
+
+    const isLong = trade.side === 'LONG';
+    const priorExtreme = Number(isLong
+      ? trade.highestPrice ?? entryPrice
+      : trade.lowestPrice ?? entryPrice);
+    const candleExtreme = Number(isLong ? candle.high : candle.low);
+    const extreme = isLong
+      ? Math.max(priorExtreme, candleExtreme)
+      : Math.min(priorExtreme, candleExtreme);
+    const favorableR = isLong
+      ? (extreme - entryPrice) / riskDistance
+      : (entryPrice - extreme) / riskDistance;
+    let stopLoss = Number(trade.stopLoss);
+
+    if (favorableR >= 1) {
+      const feeAdjustedBreakeven = entryPrice * (isLong ? 1.0035 : 0.9965);
+      stopLoss = isLong
+        ? Math.max(stopLoss, feeAdjustedBreakeven)
+        : Math.min(stopLoss, feeAdjustedBreakeven);
+    }
+
+    if (trade.tp1Filled === true) {
+      const partialProfitLock = entryPrice + (isLong ? 1 : -1) * riskDistance * 0.6;
+      stopLoss = isLong
+        ? Math.max(stopLoss, partialProfitLock)
+        : Math.min(stopLoss, partialProfitLock);
+
+      if (favorableR > 1.8) {
+        const atr = Number(trade.atr) || riskDistance / 1.5;
+        const trailingStop = isLong
+          ? extreme - 0.75 * atr
+          : extreme + 0.75 * atr;
+        stopLoss = isLong
+          ? Math.max(stopLoss, trailingStop)
+          : Math.min(stopLoss, trailingStop);
+      }
+    }
+
+    stopLoss = round(stopLoss, 8);
+    const extremeField = isLong ? 'highestPrice' : 'lowestPrice';
+    const extremeChanged = extreme !== priorExtreme;
+    const stopChanged = stopLoss !== Number(trade.stopLoss);
+    if (!extremeChanged && !stopChanged) return trade;
+
+    const monotonicUpdate = isLong
+      ? { $max: { highestPrice: extreme, stopLoss } }
+      : { $min: { lowestPrice: extreme, stopLoss } };
+    const updatedTrade = await PaperTrade.findOneAndUpdate(
+      { _id: trade._id, status: 'OPEN' },
+      monotonicUpdate,
+      { returnDocument: 'after' },
+    );
+    if (!updatedTrade) return null;
+
+    trade[extremeField] = Number(updatedTrade[extremeField]);
+    trade.stopLoss = Number(updatedTrade.stopLoss);
+    return trade;
   }
 
   async closeAtMarket(trade, reason) {
@@ -610,6 +720,8 @@ class PaperTradingEngine {
           status: 'OPEN',
         }).session(session);
         if (existingTrade) return;
+        const openTradeCount = await PaperTrade.countDocuments({ status: 'OPEN' }).session(session);
+        if (openTradeCount >= config.maxOpenTrades) return;
         const wallet = await VirtualWallet.findOneAndUpdate(
           {
             _id: 'primary',
@@ -704,9 +816,16 @@ class PaperTradingEngine {
         const newRemainingQuantity = isPartialTp1
           ? round(remainingQuantity - exitQuantity, 8)
           : 0;
-        const bufferedStopLoss = trade.side === 'LONG'
-          ? round(trade.entryPrice * 1.0035, 8)
-          : round(trade.entryPrice * 0.9965, 8);
+        const riskDistance = Math.abs(
+          Number(trade.entryPrice) - Number(trade.initialStopLoss ?? trade.stopLoss),
+        );
+        const partialProfitLock = Number(trade.entryPrice)
+          + (trade.side === 'LONG' ? 1 : -1) * riskDistance * 0.6;
+        const feeAdjustedBreakeven = Number(trade.entryPrice)
+          * (trade.side === 'LONG' ? 1.0035 : 0.9965);
+        const partialStopLoss = trade.side === 'LONG'
+          ? round(Math.max(partialProfitLock, feeAdjustedBreakeven), 8)
+          : round(Math.min(partialProfitLock, feeAdjustedBreakeven), 8);
         const releaseMargin = round(trade.margin * exitQuantity / initialQuantity, 8);
         const tradeFields = {
           exitPrice,
@@ -723,7 +842,7 @@ class PaperTradingEngine {
           Object.assign(tradeFields, {
             tp1Filled: true,
             remainingQuantity: newRemainingQuantity,
-            stopLoss: bufferedStopLoss,
+            stopLoss: partialStopLoss,
           });
         } else {
           Object.assign(tradeFields, {
@@ -778,7 +897,7 @@ class PaperTradingEngine {
           totalFeesUsd: cumulativeFeesUsd,
           closeReason,
           isPartialTp1,
-          stopLoss: isPartialTp1 ? bufferedStopLoss : trade.stopLoss,
+          stopLoss: isPartialTp1 ? partialStopLoss : trade.stopLoss,
           cooldownUntil,
           walletBalance: updatedWallet.balance,
         };
@@ -822,7 +941,7 @@ class PaperTradingEngine {
       prices: Object.fromEntries(this.prices),
       riskPercent: RISK_PERCENT,
       takerFeeRate: TAKER_FEE_RATE,
-      rewardRiskRatio: config.rewardRiskRatio,
+      rewardRiskRatio: RUNNER_TARGET_R_MULTIPLE,
       leverage: config.leverage,
       dailyLossLimit: config.dailyLossLimit,
       dailyConsecutiveLossLimit: config.dailyConsecutiveLossLimit,
@@ -944,3 +1063,4 @@ class PaperTradingEngine {
 }
 
 module.exports = PaperTradingEngine;
+module.exports.SYMBOL_LOSING_STREAK_COOLDOWN = SYMBOL_LOSING_STREAK_COOLDOWN;

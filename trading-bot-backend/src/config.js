@@ -35,6 +35,10 @@ const dailyConsecutiveLossLimit = numberFromEnv('DAILY_CONSECUTIVE_LOSS_LIMIT', 
 if (!Number.isInteger(dailyConsecutiveLossLimit)) {
   throw new Error('DAILY_CONSECUTIVE_LOSS_LIMIT must be an integer');
 }
+const maxOpenTrades = numberFromEnv('MAX_OPEN_TRADES', 3, { min: 1, max: 3 });
+if (!Number.isInteger(maxOpenTrades)) {
+  throw new Error('MAX_OPEN_TRADES must be an integer between 1 and 3');
+}
 
 const config = {
   port: numberFromEnv('PORT', 3001, { min: 1, max: 65535 }),
@@ -49,10 +53,10 @@ const config = {
     .filter(Boolean),
   candleInterval,
   entryIntervals,
-  botEnabled: (process.env.BOT_ENABLED || 'true').toLowerCase() === 'true',
+  botEnabled: (process.env.BOT_ENABLED || 'true').toLowerCase() !== 'false',
+  maxOpenTrades,
   initialBalance: numberFromEnv('INITIAL_BALANCE_USDT', 10_000, { min: 1 }),
   leverage: numberFromEnv('PAPER_LEVERAGE', 1, { min: 1, max: 5 }),
-  rewardRiskRatio: numberFromEnv('REWARD_RISK_RATIO', 2, { min: 1, max: 10 }),
   dailyLossLimit: numberFromEnv('DAILY_LOSS_LIMIT_USDT', 400, { min: 1 }),
   dailyConsecutiveLossLimit,
   ntfyTopic: process.env.NTFY_TOPIC || 'auraalgo_live_897k3_rajesh',
