@@ -13,7 +13,7 @@ AuraAlgo is a browser dashboard plus a Node.js paper-trading backend. It reads p
 
 The following is a point-in-time read-only check, not a promise of future uptime:
 
-- Render service: `https://tendere-1.onrender.com`
+- Render service: `https://tendere-htip.onrender.com`
 - Vercel dashboard: `https://auraalgo-crypto-paper-trading.vercel.app`
 - `/api/health/live`: HTTP 200
 - `/api/health/ready`: HTTP 200; MongoDB connected; backend engine running
@@ -198,7 +198,7 @@ Error codes such as `DATA_FEED_OFFLINE`, `INSUFFICIENT_HISTORICAL_DATA`, and `OR
 
 - Root build is the Vite app; `vercel.json` forwards read endpoints to the Render URL.
 - Control gateway environment variables:
-  - `PAPER_TRADING_API_URL`: Render base URL only, e.g. `https://tendere-1.onrender.com` (no `/api`).
+  - `PAPER_TRADING_API_URL`: Render base URL only, e.g. `https://tendere-htip.onrender.com` (no `/api`).
   - `BOT_CONTROL_TOKEN`: same secret as Render; keep it server-side and never prefix with `VITE_`.
   - `CONTROL_DASHBOARD_ORIGIN`: exact production origin, including `https://`, no trailing slash.
 - `VITE_API_BASE_URL` is not needed for current production rewrites; frontend defaults to `/api`. If configuring it, do not point at a stale Render hostname.

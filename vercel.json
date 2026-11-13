@@ -1,24 +1,8 @@
 {
   "rewrites": [
     {
-      "source": "/api/health/:path*",
-      "destination": "https://tendere-1.onrender.com/api/health/:path*"
-    },
-    {
-      "source": "/api/bot/:path*",
-      "destination": "https://tendere-1.onrender.com/api/bot/:path*"
-    },
-    {
-      "source": "/api/wallet",
-      "destination": "https://tendere-1.onrender.com/api/wallet"
-    },
-    {
-      "source": "/api/trades/:path*",
-      "destination": "https://tendere-1.onrender.com/api/trades/:path*"
-    },
-    {
-      "source": "/api/market/:path*",
-      "destination": "https://tendere-1.onrender.com/api/market/:path*"
+      "source": "/api/(?!control(?:/|$))(.*)",
+      "destination": "https://tendere-htip.onrender.com/api/$1"
     }
   ]
 }
