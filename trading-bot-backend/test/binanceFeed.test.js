@@ -259,6 +259,7 @@ test('418 pauses REST bootstrap until the ban expires, then restores history whi
         close: 100,
         volume: 2,
         isFinal: true,
+        isClosed: true,
       };
     })];
   }));

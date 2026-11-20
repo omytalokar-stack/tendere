@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const { config, SYMBOLS } = require('../config');
 const BotState = require('../models/BotState');
+const DailyRiskState = require('../models/DailyRiskState');
 const PaperTrade = require('../models/PaperTrade');
 const VirtualWallet = require('../models/VirtualWallet');
 const BinanceFeed = require('./binanceFeed');
@@ -8,7 +9,7 @@ const {
   analyzeCandles,
   getEntrySignal,
   getConfirmedEntrySignal,
-  RISK_PERCENT,
+  rankOpportunities,
   sizePosition,
   MIN_CANDLES,
 } = require('./strategy');
@@ -18,9 +19,15 @@ const {
   notifyTradeClosed,
   notifyDailyLossLimit,
 } = require('./notificationAlerts');
-const TAKER_SLIPPAGE_RATE = 0.00075;
-const TAKER_FEE_RATE = 0.00075;
-const RUNNER_TARGET_R_MULTIPLE = 2.5;
+const TAKER_FEE_RATE = 0;
+const POSITION_MARGIN_FRACTION = 0.25;
+const MAX_POSITION_MARGIN_USDT = 2_500;
+const STOP_LOSS_ATR_MULTIPLE = 1.5;
+const TP1_ATR_MULTIPLE = 1.5;
+const TP2_ATR_MULTIPLE = 3;
+const DAILY_LOSS_EQUITY_FRACTION = 0.05;
+const DAILY_CONSECUTIVE_LOSS_LIMIT = 3;
+const MAX_OPPORTUNITIES_PER_SCAN = 2;
 const COOLDOWN_CANDLES = 3;
 const SYMBOL_LOSING_STREAK_LOOKBACK_MS = 12 * 60 * 60 * 1000;
 const SYMBOL_LOSING_STREAK_COOLDOWN = 6 * 60 * 60 * 1000;
@@ -41,6 +48,7 @@ class PaperTradingEngine {
     this.running = false;
     this.enabled = false;
     this.prices = new Map();
+    this.tickCounts = new Map(SYMBOLS.map((symbol) => [symbol, 0]));
     this.candles = new Map(SYMBOLS.map((symbol) => [symbol, []]));
     this.candleHistories = new Map(config.entryIntervals.map((interval) => [
       interval,
@@ -62,7 +70,6 @@ class PaperTradingEngine {
     this.pendingExits = new Map();
     this.closingTrades = new Set();
     this.dailyLossAlertDate = null;
-    this.dailyConsecutiveLossAlertDate = null;
     this.auditLog = [];
     this.feedStates = new Map(SYMBOLS.map((symbol) => [symbol, {
       error: `DATA_FEED_OFFLINE: Binance real feed failed for ${symbol}: awaiting initial synchronization`,
@@ -73,6 +80,7 @@ class PaperTradingEngine {
       onCandle: (symbol, candles, options) => this.handleCandles(symbol, candles, options),
       onPrice: (symbol, price, timestamp) => {
         this.prices.set(symbol, price);
+        this.tickCounts.set(symbol, (this.tickCounts.get(symbol) || 0) + 1);
         const state = this.feedStates.get(symbol);
         if (state) state.lastTradeAt = timestamp;
         this.handlePrice(symbol).catch((error) =>
@@ -131,6 +139,51 @@ class PaperTradingEngine {
     );
   }
 
+  async initializeDailyRiskState(now = new Date()) {
+    const key = now.toISOString().slice(0, 10);
+    const existing = await DailyRiskState.findById(key).lean();
+    if (existing) return existing;
+    const wallet = await VirtualWallet.findById('primary').lean();
+    if (!wallet) throw new Error('Virtual wallet has not been initialized');
+
+    const dayStart = new Date(`${key}T00:00:00.000Z`);
+    const [closedTrades, recentTrades] = await Promise.all([
+      PaperTrade.find({ status: 'CLOSED', closedAt: { $gte: dayStart } })
+        .select('pnlUsd')
+        .lean(),
+      PaperTrade.find({ status: 'CLOSED', closedAt: { $gte: dayStart } })
+        .select('pnlUsd closedAt')
+        .sort({ closedAt: -1 })
+        .lean(),
+    ]);
+    const dailyNetRealizedPnl = closedTrades.reduce((sum, trade) => sum + Number(trade.pnlUsd || 0), 0);
+    let consecutiveLosses = 0;
+    for (const trade of recentTrades) {
+      if (trade.pnlUsd >= 0) break;
+      consecutiveLosses += 1;
+    }
+    const dayStartEquity = Math.max(0, Number(wallet.balance) - dailyNetRealizedPnl);
+    const pauseReason = consecutiveLosses >= DAILY_CONSECUTIVE_LOSS_LIMIT
+      ? 'CONSECUTIVE_LOSSES'
+      : dailyNetRealizedPnl <= -(dayStartEquity * DAILY_LOSS_EQUITY_FRACTION)
+        ? 'DAILY_EQUITY_LOSS'
+        : null;
+    return DailyRiskState.findOneAndUpdate(
+      { _id: key },
+      {
+        $setOnInsert: {
+          dayStartEquity,
+          dailyNetRealizedPnl,
+          consecutiveLosses,
+          paused: Boolean(pauseReason),
+          pauseReason,
+          pausedAt: pauseReason ? now : null,
+        },
+      },
+      { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true },
+    ).lean();
+  }
+
   async getOrCreateBotState() {
     return BotState.findOneAndUpdate(
       { _id: 'primary' },
@@ -145,6 +198,7 @@ class PaperTradingEngine {
     this.running = true;
     try {
       await this.initializeWallet();
+      await this.initializeDailyRiskState();
       await this.feed.start();
     } catch (error) {
       this.running = false;
@@ -155,11 +209,11 @@ class PaperTradingEngine {
       symbols: SYMBOLS,
       interval: config.candleInterval,
       entryIntervals: config.entryIntervals,
-      riskPercent: RISK_PERCENT,
-      rewardRiskRatio: RUNNER_TARGET_R_MULTIPLE,
+      maxPositionMargin: MAX_POSITION_MARGIN_USDT,
+      positionMarginFraction: POSITION_MARGIN_FRACTION,
       leverage: config.leverage,
-      dailyLossLimit: config.dailyLossLimit,
-      dailyConsecutiveLossLimit: config.dailyConsecutiveLossLimit,
+      dailyLossEquityFraction: DAILY_LOSS_EQUITY_FRACTION,
+      dailyConsecutiveLossLimit: DAILY_CONSECUTIVE_LOSS_LIMIT,
     });
     this.recordAudit('ENGINE', null, 'Paper trading engine started');
   }
@@ -264,8 +318,7 @@ class PaperTradingEngine {
     const openTrade = await PaperTrade.findOne({ symbol, status: 'OPEN' });
     if (openTrade) {
       if (interval === config.candleInterval) {
-        let exit = await this.getManagedExit(openTrade, candle);
-        if (!exit) exit = await this.getMomentumReversal(openTrade, history);
+        const exit = await this.getManagedExit(openTrade, candle);
         if (exit) {
           this.pendingExits.set(symbol, exit.reason);
           const closed = await this.closeAtMarket(openTrade, exit.reason);
@@ -301,77 +354,81 @@ class PaperTradingEngine {
       : null;
     if (confirmationHistories && !SYMBOLS.every((symbol) =>
       this.isCandleHistoryComplete(confirmationHistories.get(symbol)))) return;
-    if (await this.dailyLossLimitReached()) {
-      this.logger.warn('Daily loss limit reached; new paper positions are paused');
-      this.sendDailyLossAlertOnce();
-      return;
-    }
-    if (await this.dailyConsecutiveLossLimitReached()) {
-      this.recordDailyConsecutiveLossPause();
-      return;
-    }
+    if (await this.dailyCircuitBreakerReached()) return;
 
     let openTradeCount = await PaperTrade.countDocuments({ status: 'OPEN' });
     if (openTradeCount >= config.maxOpenTrades) return;
 
-    const wallet = await VirtualWallet.findById('primary');
-    if (!wallet) throw new Error('Virtual wallet has not been initialized');
+    const initializedWallet = await VirtualWallet.findById('primary');
+    if (!initializedWallet) throw new Error('Virtual wallet has not been initialized');
 
+    const opportunities = [];
     for (const symbol of SYMBOLS) {
-      if (openTradeCount >= config.maxOpenTrades) break;
-      if (await this.isSymbolCoolingDown(symbol)) continue;
       const history = histories.get(symbol);
-      const executionBook = await this.refreshExecutionBook(symbol);
-      if (!this.isOrderBookFresh(executionBook)) continue;
-
-      const analysis = analyzeCandles(history, executionBook);
+      const analysis = analyzeCandles(history);
       const confirmationAnalysis = confirmationHistories
-        ? analyzeCandles(confirmationHistories.get(symbol), executionBook)
+        ? analyzeCandles(confirmationHistories.get(symbol))
         : null;
       const direction = confirmationAnalysis
         ? getConfirmedEntrySignal(analysis, confirmationAnalysis)
         : getEntrySignal(analysis);
       if (!direction) continue;
 
-      const stopDistance = analysis.atr * 1.5;
+      opportunities.push({
+        symbol,
+        direction,
+        analysis,
+        opportunityScore: analysis.volumeSpikeRatio * analysis.adx,
+      });
+    }
+
+    const rankedOpportunities = rankOpportunities(opportunities, MAX_OPPORTUNITIES_PER_SCAN);
+    for (const opportunity of rankedOpportunities) {
+      if (openTradeCount >= config.maxOpenTrades) break;
+      const { symbol, direction, analysis } = opportunity;
+      if (await this.isSymbolCoolingDown(symbol)) continue;
+      const lastTradeAt = this.feedStates.get(symbol)?.lastTradeAt;
+      const entryQuote = this.prices.get(symbol);
+      if (!this.isTradeQuoteFresh(symbol, entryQuote, lastTradeAt)) continue;
+
+      const stopDistance = analysis.atr * STOP_LOSS_ATR_MULTIPLE;
       if (!Number.isFinite(stopDistance) || stopDistance <= 0) continue;
-      const rawEntryQuote = direction === 'LONG' ? executionBook.bestAsk : executionBook.bestBid;
-      const entryPrice = this.applyTakerSlippage(rawEntryQuote, direction === 'LONG' ? 'BUY' : 'SELL');
+      const entryPrice = entryQuote;
       const stopLoss = direction === 'LONG'
         ? entryPrice - stopDistance
         : entryPrice + stopDistance;
       const tp1Price = direction === 'LONG'
-        ? entryPrice + stopDistance * 1.3
-        : entryPrice - stopDistance * 1.3;
+        ? entryPrice + analysis.atr * TP1_ATR_MULTIPLE
+        : entryPrice - analysis.atr * TP1_ATR_MULTIPLE;
       const tp2Price = direction === 'LONG'
-        ? entryPrice + stopDistance * RUNNER_TARGET_R_MULTIPLE
-        : entryPrice - stopDistance * RUNNER_TARGET_R_MULTIPLE;
+        ? entryPrice + analysis.atr * TP2_ATR_MULTIPLE
+        : entryPrice - analysis.atr * TP2_ATR_MULTIPLE;
       if (stopLoss <= 0 || tp1Price <= 0 || tp2Price <= 0) continue;
 
+      const wallet = await VirtualWallet.findById('primary');
+      if (!wallet) throw new Error('Virtual wallet has not been initialized');
       const position = sizePosition({
-        balance: wallet.balance,
+        availableMargin: wallet.availableMargin,
         entryPrice,
-        stopLoss,
-        leverage: config.leverage,
+        maxAllocation: MAX_POSITION_MARGIN_USDT,
       });
-      const entryFeeUsd = round(entryPrice * position.quantity * TAKER_FEE_RATE, 8);
       if (!this.enabled
-        || position.margin + entryFeeUsd > wallet.availableMargin
+        || position.margin > wallet.availableMargin
         || position.quantity <= 0) continue;
 
       const openedTrade = await this.openTrade({
         symbol,
         side: direction,
         entryPrice,
-        entryQuote: rawEntryQuote,
+        entryQuote,
         initialStopLoss: stopLoss,
         atr: analysis.atr,
         highestPrice: entryPrice,
         lowestPrice: entryPrice,
-        executionCostUsd: round(Math.abs(entryPrice - rawEntryQuote) * position.quantity, 8),
-        entryFeeUsd,
+        executionCostUsd: 0,
+        entryFeeUsd: 0,
         exitFeeUsd: 0,
-        totalFeesUsd: entryFeeUsd,
+        totalFeesUsd: 0,
         initialQuantity: position.quantity,
         remainingQuantity: position.quantity,
         tp1Price,
@@ -383,7 +440,7 @@ class PaperTradingEngine {
         leverage: config.leverage,
         stopLoss,
         takeProfit: tp2Price,
-        strategy: `${interval}${confirmationAnalysis ? ' + 15m confirmed' : ''}: ${analysis.strategy} (${direction === 'LONG' ? analysis.buyVotes : analysis.sellVotes}/${analysis.totalVotes})`,
+        strategy: `${interval}${confirmationHistories ? ' + 15m confirmed' : ''}: ${analysis.strategy} (${direction === 'LONG' ? analysis.bullishCount : analysis.bearishCount}/${analysis.totalVotes})`,
         openedAt: new Date(),
       });
       if (openedTrade) openTradeCount += 1;
@@ -421,28 +478,12 @@ class PaperTradingEngine {
     return Boolean(activeCooldown);
   }
 
-  async getMomentumReversal(trade, history) {
-    let orderBook = this.orderBooks.get(trade.symbol);
-    if (!this.isOrderBookFresh(orderBook)) {
-      orderBook = await this.refreshExecutionBook(trade.symbol);
-    }
-    if (!this.isOrderBookFresh(orderBook)) return null;
-    const direction = getEntrySignal(analyzeCandles(history, orderBook));
-    return direction && direction !== trade.side
-      ? { reason: 'EARLY_MOMENTUM_REVERSAL' }
-      : null;
-  }
-
-  applyTakerSlippage(quote, action) {
-    return round(quote * (action === 'BUY' ? 1 + TAKER_SLIPPAGE_RATE : 1 - TAKER_SLIPPAGE_RATE), 12);
-  }
-
-  async refreshExecutionBook(symbol) {
-    const orderBook = this.orderBooks.get(symbol);
-    if (this.isOrderBookFresh(orderBook)) return orderBook;
-    this.updateFeedState(symbol, { orderBookError: 'ORDERBOOK_DISCONNECTED: no fresh Binance depth stream data' });
-    this.logger.warn('Fresh Binance depth stream data unavailable; paper execution is frozen', { symbol });
-    return null;
+  isTradeQuoteFresh(symbol, price = this.prices.get(symbol), timestamp = this.feedStates.get(symbol)?.lastTradeAt) {
+    return Number.isFinite(price)
+      && price > 0
+      && timestamp instanceof Date
+      && Date.now() - timestamp.getTime() >= 0
+      && Date.now() - timestamp.getTime() <= MAX_MARKET_DATA_AGE_MS;
   }
 
   isOrderBookFresh(orderBook) {
@@ -456,7 +497,7 @@ class PaperTradingEngine {
 
   isCandleHistoryComplete(candles) {
     return candles.length === REQUIRED_CANDLES
-      && candles.every((candle) => candle.isFinal === true)
+      && candles.every((candle) => candle.isClosed === true)
       && candles.slice(1).every((candle, index) =>
         candles[index].closeTime + 1 === candle.openTime);
   }
@@ -465,7 +506,6 @@ class PaperTradingEngine {
     if (!this.feed.connected) return false;
     return SYMBOLS.every((symbol) => {
       const state = this.feedStates.get(symbol);
-      const orderBook = this.orderBooks.get(symbol);
       const candleDataReady = config.entryIntervals.every((interval) => {
         const candles = this.candleHistories.get(interval)?.get(symbol) || [];
         if (candles.length === REQUIRED_CANDLES && !this.isCandleHistoryComplete(candles)) {
@@ -478,8 +518,7 @@ class PaperTradingEngine {
           && !this.candleErrors.get(interval)?.get(symbol);
       });
       return candleDataReady
-        && !state?.orderBookError
-        && this.isOrderBookFresh(orderBook);
+        && this.isTradeQuoteFresh(symbol, this.prices.get(symbol), state?.lastTradeAt);
     });
   }
 
@@ -511,7 +550,8 @@ class PaperTradingEngine {
 
   async getManagedExit(trade, candle) {
     const exitBeforeProtection = this.getExit(trade, candle);
-    if (exitBeforeProtection?.reason === 'STOP_LOSS') return exitBeforeProtection;
+    if (exitBeforeProtection?.reason === 'STOP_LOSS'
+      || exitBeforeProtection?.reason === 'PARTIAL_TP1_FILLED') return exitBeforeProtection;
 
     const protectedTrade = await this.updateTradeProtection(trade, candle);
     return protectedTrade ? this.getExit(protectedTrade, candle) : null;
@@ -545,23 +585,6 @@ class PaperTradingEngine {
         : Math.min(stopLoss, feeAdjustedBreakeven);
     }
 
-    if (trade.tp1Filled === true) {
-      const partialProfitLock = entryPrice + (isLong ? 1 : -1) * riskDistance * 0.6;
-      stopLoss = isLong
-        ? Math.max(stopLoss, partialProfitLock)
-        : Math.min(stopLoss, partialProfitLock);
-
-      if (favorableR > 1.8) {
-        const atr = Number(trade.atr) || riskDistance / 1.5;
-        const trailingStop = isLong
-          ? extreme - 0.75 * atr
-          : extreme + 0.75 * atr;
-        stopLoss = isLong
-          ? Math.max(stopLoss, trailingStop)
-          : Math.min(stopLoss, trailingStop);
-      }
-    }
-
     stopLoss = round(stopLoss, 8);
     const extremeField = isLong ? 'highestPrice' : 'lowestPrice';
     const extremeChanged = extreme !== priorExtreme;
@@ -589,12 +612,12 @@ class PaperTradingEngine {
     this.closingTrades.add(tradeId);
     try {
       if (!this.feed.connected) return null;
-      const orderBook = await this.refreshExecutionBook(trade.symbol);
-      if (!this.isOrderBookFresh(orderBook)) return null;
-      const quote = trade.side === 'LONG' ? orderBook.bestBid : orderBook.bestAsk;
-      const exitPrice = this.applyTakerSlippage(quote, trade.side === 'LONG' ? 'SELL' : 'BUY');
+      const quote = this.prices.get(trade.symbol);
+      const lastTradeAt = this.feedStates.get(trade.symbol)?.lastTradeAt;
+      if (!this.isTradeQuoteFresh(trade.symbol, quote, lastTradeAt)) return null;
+      const exitPrice = round(quote, 12);
       const failureAnalysis = reason === 'STOP_LOSS'
-        ? this.captureFailureAnalysis(trade.symbol, orderBook)
+        ? this.captureFailureAnalysis(trade.symbol)
         : null;
       return await this.closeTrade(trade._id, exitPrice, reason, quote, failureAnalysis);
     } finally {
@@ -602,19 +625,18 @@ class PaperTradingEngine {
     }
   }
 
-  captureFailureAnalysis(symbol, orderBook) {
+  captureFailureAnalysis(symbol) {
     const capturedAt = new Date();
     try {
-      const analysis = analyzeCandles(this.candles.get(symbol) || [], orderBook);
+      const analysis = analyzeCandles(this.candles.get(symbol) || []);
       return {
         capturedAt,
-        buyVotes: analysis.buyVotes,
-        sellVotes: analysis.sellVotes,
+        bullishCount: analysis.bullishCount,
+        bearishCount: analysis.bearishCount,
         totalVotes: analysis.totalVotes,
         currentVolume: analysis.currentVolume,
         averageVolume: analysis.averageVolume,
         volumeRatio: analysis.volumeRatio,
-        orderBookPressure: analysis.orderBookPressure,
         indicators: analysis.indicators,
       };
     } catch (error) {
@@ -628,53 +650,35 @@ class PaperTradingEngine {
     }
   }
 
-  async dailyLossLimitReached() {
-    const since = new Date();
-    since.setUTCHours(0, 0, 0, 0);
-    const result = await PaperTrade.aggregate([
-      { $match: { status: 'CLOSED', closedAt: { $gte: since }, pnlUsd: { $lt: 0 } } },
-      { $group: { _id: null, loss: { $sum: '$pnlUsd' } } },
-    ]);
-    return Math.abs(result[0]?.loss || 0) >= config.dailyLossLimit;
-  }
+  async dailyCircuitBreakerReached(now = new Date()) {
+    const state = await this.initializeDailyRiskState(now);
+    const equityLossLimit = Number(state.dayStartEquity) * DAILY_LOSS_EQUITY_FRACTION;
+    const lossTriggered = Number(state.dailyNetRealizedPnl) <= -equityLossLimit;
+    const streakTriggered = Number(state.consecutiveLosses) >= DAILY_CONSECUTIVE_LOSS_LIMIT;
+    const shouldPause = Boolean(state.paused || lossTriggered || streakTriggered);
+    if (!shouldPause) return false;
 
-  async dailyConsecutiveLossLimitReached() {
-    const utcDayStart = new Date();
-    utcDayStart.setUTCHours(0, 0, 0, 0);
-    const trades = await PaperTrade.find({
-      status: 'CLOSED',
-      closedAt: { $gte: utcDayStart },
-    })
-      .select('pnlUsd')
-      .sort({ closedAt: 1 })
-      .lean();
-
-    let consecutiveLosses = 0;
-    for (const trade of trades) {
-      consecutiveLosses = trade.pnlUsd < 0 ? consecutiveLosses + 1 : 0;
-      if (consecutiveLosses >= config.dailyConsecutiveLossLimit) return true;
-    }
-    return false;
-  }
-
-  recordDailyConsecutiveLossPause() {
-    const today = new Date().toISOString().slice(0, 10);
-    if (this.dailyConsecutiveLossAlertDate === today) return;
-    this.dailyConsecutiveLossAlertDate = today;
-    this.logger.warn('Daily consecutive-loss limit reached; new paper positions are paused');
-    this.recordAudit(
-      'ENGINE',
-      null,
-      `New entries paused after ${config.dailyConsecutiveLossLimit} consecutive losing trades today (UTC)`,
+    const reason = state.pauseReason
+      || (streakTriggered ? 'CONSECUTIVE_LOSSES' : 'DAILY_EQUITY_LOSS');
+    await DailyRiskState.updateOne(
+      { _id: state._id },
+      { $set: { paused: true, pauseReason: reason, pausedAt: state.pausedAt || now } },
     );
+    this.recordDailyCircuitBreaker(reason, state, equityLossLimit, now);
+    return true;
   }
 
-  sendDailyLossAlertOnce() {
-    const today = new Date().toISOString().slice(0, 10);
+  recordDailyCircuitBreaker(reason, state, equityLossLimit, now = new Date()) {
+    const today = now.toISOString().slice(0, 10);
     if (this.dailyLossAlertDate === today) return;
     this.dailyLossAlertDate = today;
-    this.dispatchNotification('daily loss limit', () =>
-      notifyDailyLossLimit(config.dailyLossLimit, this.logger));
+    const message = reason === 'CONSECUTIVE_LOSSES'
+      ? `New entries paused after ${DAILY_CONSECUTIVE_LOSS_LIMIT} consecutive losing trades today (UTC)`
+      : `New entries paused after daily net realized loss reached 5% of UTC day-start equity (${equityLossLimit.toFixed(2)} USDT)`;
+    this.logger.warn(message);
+    this.recordAudit('ENGINE', null, message);
+    this.dispatchNotification('daily loss circuit breaker', () =>
+      notifyDailyLossLimit(equityLossLimit, this.logger));
   }
 
   dispatchNotification(event, send) {
@@ -689,19 +693,19 @@ class PaperTradingEngine {
     trade,
     exitPrice,
     quantity = trade.quantity,
-    entryFeeUsd = trade.entryFeeUsd
+    entryFeeUsd = 0
   ) {
     const sign = trade.side === 'LONG' ? 1 : -1;
     const grossPnlUsd = round(sign * (exitPrice - trade.entryPrice) * quantity, 8);
-    const allocatedEntryFeeUsd = Number(entryFeeUsd || 0);
-    const exitFeeUsd = round(exitPrice * quantity * TAKER_FEE_RATE, 8);
-    const totalFeesUsd = round(allocatedEntryFeeUsd + exitFeeUsd, 8);
+    const allocatedEntryFeeUsd = 0;
+    const exitFeeUsd = 0;
+    const totalFeesUsd = 0;
     return {
       grossPnlUsd,
       entryFeeUsd: allocatedEntryFeeUsd,
       exitFeeUsd,
       totalFeesUsd,
-      netPnlUsd: round(grossPnlUsd - totalFeesUsd, 8),
+      netPnlUsd: grossPnlUsd,
     };
   }
 
@@ -711,6 +715,9 @@ class PaperTradingEngine {
   }
 
   async openTrade(tradeData) {
+    if (!Number.isFinite(tradeData.margin)
+      || tradeData.margin <= 0
+      || tradeData.margin > MAX_POSITION_MARGIN_USDT) return null;
     const session = await mongoose.startSession();
     try {
       let createdTrade;
@@ -725,11 +732,16 @@ class PaperTradingEngine {
         const wallet = await VirtualWallet.findOneAndUpdate(
           {
             _id: 'primary',
-            availableMargin: { $gte: tradeData.margin + tradeData.entryFeeUsd },
+            availableMargin: {
+              $gte: Math.max(
+                tradeData.margin,
+                tradeData.margin / POSITION_MARGIN_FRACTION,
+              ),
+            },
           },
           {
             $inc: {
-              availableMargin: -(tradeData.margin + tradeData.entryFeeUsd),
+              availableMargin: -tradeData.margin,
               inTradeMargin: tradeData.margin,
             },
           },
@@ -795,14 +807,7 @@ class PaperTradingEngine {
         const priorRealizedPnl = Number(trade.realizedPnl || 0);
         const priorGrossPnlUsd = Number(trade.grossPnlUsd || 0);
         const priorExitFeeUsd = Number(trade.exitFeeUsd || 0);
-        const allocatedEntryFees = round(
-          priorGrossPnlUsd - priorExitFeeUsd - priorRealizedPnl,
-          8,
-        );
-        const entryFeeForExit = isPartialTp1
-          ? round(Number(trade.entryFeeUsd || 0) * exitQuantity / initialQuantity, 8)
-          : round(Number(trade.entryFeeUsd || 0) - allocatedEntryFees, 8);
-        const result = this.calculateTradeResult(trade, exitPrice, exitQuantity, entryFeeForExit);
+        const result = this.calculateTradeResult(trade, exitPrice, exitQuantity);
         const { grossPnlUsd, exitFeeUsd, totalFeesUsd, netPnlUsd } = result;
         const cumulativeRealizedPnl = round(priorRealizedPnl + netPnlUsd, 8);
         const cumulativeGrossPnlUsd = round(priorGrossPnlUsd + grossPnlUsd, 8);
@@ -816,16 +821,9 @@ class PaperTradingEngine {
         const newRemainingQuantity = isPartialTp1
           ? round(remainingQuantity - exitQuantity, 8)
           : 0;
-        const riskDistance = Math.abs(
-          Number(trade.entryPrice) - Number(trade.initialStopLoss ?? trade.stopLoss),
-        );
-        const partialProfitLock = Number(trade.entryPrice)
-          + (trade.side === 'LONG' ? 1 : -1) * riskDistance * 0.6;
         const feeAdjustedBreakeven = Number(trade.entryPrice)
           * (trade.side === 'LONG' ? 1.0035 : 0.9965);
-        const partialStopLoss = trade.side === 'LONG'
-          ? round(Math.max(partialProfitLock, feeAdjustedBreakeven), 8)
-          : round(Math.min(partialProfitLock, feeAdjustedBreakeven), 8);
+        const partialStopLoss = round(feeAdjustedBreakeven, 8);
         const releaseMargin = round(trade.margin * exitQuantity / initialQuantity, 8);
         const tradeFields = {
           exitPrice,
@@ -883,6 +881,37 @@ class PaperTradingEngine {
           { returnDocument: 'after', session }
         );
         if (!updatedWallet) throw new Error('Wallet margin does not cover the open trade');
+        const dayKey = closedAt.toISOString().slice(0, 10);
+        const dailyRiskState = await DailyRiskState.findById(dayKey).session(session);
+        const priorDailyNet = Number(dailyRiskState?.dailyNetRealizedPnl || 0);
+        const dailyNetRealizedPnl = round(priorDailyNet + netPnlUsd, 8);
+        const dayStartEquity = Number(dailyRiskState?.dayStartEquity
+          ?? Math.max(0, Number(updatedWallet.balance) - dailyNetRealizedPnl));
+        const consecutiveLosses = isPartialTp1
+          ? Number(dailyRiskState?.consecutiveLosses || 0)
+          : cumulativeRealizedPnl < 0
+            ? Number(dailyRiskState?.consecutiveLosses || 0) + 1
+            : 0;
+        const pauseReason = dailyRiskState?.pauseReason
+          || (consecutiveLosses >= DAILY_CONSECUTIVE_LOSS_LIMIT
+            ? 'CONSECUTIVE_LOSSES'
+            : dailyNetRealizedPnl <= -(dayStartEquity * DAILY_LOSS_EQUITY_FRACTION)
+              ? 'DAILY_EQUITY_LOSS'
+              : null);
+        await DailyRiskState.findOneAndUpdate(
+          { _id: dayKey },
+          {
+            $setOnInsert: { dayStartEquity },
+            $set: {
+              dailyNetRealizedPnl,
+              consecutiveLosses,
+              paused: Boolean(dailyRiskState?.paused || pauseReason),
+              pauseReason,
+              ...(pauseReason && !dailyRiskState?.pausedAt ? { pausedAt: closedAt } : {}),
+            },
+          },
+          { upsert: true, returnDocument: 'after', session },
+        );
         closedTrade = {
           id: trade.id,
           symbol: trade.symbol,
@@ -931,6 +960,8 @@ class PaperTradingEngine {
 
   async status() {
     const state = await BotState.findById('primary').lean();
+    const dailyRiskState = await this.initializeDailyRiskState();
+    const dailyLossLimit = Number(dailyRiskState.dayStartEquity) * DAILY_LOSS_EQUITY_FRACTION;
     return {
       running: this.running,
       enabled: this.enabled && Boolean(state?.enabled),
@@ -939,12 +970,24 @@ class PaperTradingEngine {
       entryIntervals: config.entryIntervals,
       symbols: SYMBOLS,
       prices: Object.fromEntries(this.prices),
-      riskPercent: RISK_PERCENT,
+      riskPercent: 0,
+      positionMarginFraction: POSITION_MARGIN_FRACTION,
+      maxPositionMargin: MAX_POSITION_MARGIN_USDT,
       takerFeeRate: TAKER_FEE_RATE,
-      rewardRiskRatio: RUNNER_TARGET_R_MULTIPLE,
+      rewardRiskRatio: 2,
       leverage: config.leverage,
-      dailyLossLimit: config.dailyLossLimit,
-      dailyConsecutiveLossLimit: config.dailyConsecutiveLossLimit,
+      dailyLossLimit,
+      dailyLossEquityFraction: DAILY_LOSS_EQUITY_FRACTION,
+      dailyConsecutiveLossLimit: DAILY_CONSECUTIVE_LOSS_LIMIT,
+      dailyCircuitBreaker: {
+        dayStartEquity: dailyRiskState.dayStartEquity,
+        dailyNetRealizedPnl: dailyRiskState.dailyNetRealizedPnl,
+        consecutiveLosses: dailyRiskState.consecutiveLosses,
+        paused: dailyRiskState.paused,
+        pauseReason: dailyRiskState.pauseReason,
+        pausedUntil: new Date(`${dailyRiskState._id}T23:59:59.999Z`).toISOString(),
+      },
+      tickCounts: Object.fromEntries(this.tickCounts),
       lastProcessed: Object.fromEntries(this.lastProcessedCandle),
       marketDataReady: this.allMarketDataReady(),
       marketErrors: Object.fromEntries(SYMBOLS.map((symbol) => [symbol, {
@@ -973,8 +1016,8 @@ class PaperTradingEngine {
     const lastTradeAt = state?.lastTradeAt;
     const lastTradeAge = lastTradeAt ? Date.now() - new Date(lastTradeAt).getTime() : Infinity;
     const orderBookFresh = this.isOrderBookFresh(orderBook);
-    const priceSource = lastTradeAge <= MAX_MARKET_DATA_AGE_MS
-      && Number.isFinite(this.prices.get(symbol))
+    const tradePriceFresh = this.isTradeQuoteFresh(symbol, this.prices.get(symbol), lastTradeAt);
+    const priceSource = tradePriceFresh
       ? 'TRADE'
       : orderBookFresh ? 'ORDER_BOOK_MID' : null;
     const quoteUpdatedAt = priceSource === 'TRADE' ? lastTradeAt : orderBook?.updatedAt;
@@ -988,12 +1031,16 @@ class PaperTradingEngine {
         ? `DATA_FEED_OFFLINE: Binance real feed failed for ${symbol}: expected ${REQUIRED_CANDLES} completed candles, received ${candles.length}`
         : !this.isCandleHistoryComplete(candles)
           ? `DATA_FEED_OFFLINE: Binance real feed failed for ${symbol}: completed candle history is invalid or contains a time gap`
-          : null)
-      || (!quoteUpdatedAt || marketAge > MAX_MARKET_DATA_AGE_MS
-        ? `DATA_FEED_OFFLINE: Binance real feed failed for ${symbol}: no fresh trade or order-book quote`
-        : null);
+          : null);
     const orderBookError = state?.orderBookError
       || (!orderBookFresh ? 'ORDERBOOK_DISCONNECTED' : null);
+    const candleIntervalMs = CANDLE_INTERVAL_MS[config.candleInterval];
+    const lastClosedAt = candles.length
+      ? candles[candles.length - 1].openTime + candleIntervalMs
+      : null;
+    const nextCandleCloseAt = lastClosedAt && lastClosedAt > Date.now()
+      ? lastClosedAt
+      : lastClosedAt ? lastClosedAt + candleIntervalMs : null;
     return {
       symbol,
       candles,
@@ -1004,9 +1051,11 @@ class PaperTradingEngine {
       priceSource,
       lastTradeAt: lastTradeAt ?? null,
       marketAgeMs: Number.isFinite(marketAge) ? marketAge : null,
+      tickCount: this.tickCounts.get(symbol) || 0,
+      nextCandleCloseAt: nextCandleCloseAt ? new Date(nextCandleCloseAt).toISOString() : null,
       candleError,
       orderBookError,
-      ready: !candleError && !orderBookError && this.feed.connected,
+      ready: !candleError && tradePriceFresh && this.feed.connected,
     };
   }
 
@@ -1022,30 +1071,47 @@ class PaperTradingEngine {
       error.status = 503;
       throw error;
     }
-    if (market.orderBookError || !market.orderBook) {
-      const error = new Error('ORDERBOOK_DISCONNECTED');
-      error.status = 503;
-      throw error;
+    const analysis = analyzeCandles(market.candles);
+    const book = market.orderBook;
+    if (book && Number.isFinite(book.bidQuantity) && Number.isFinite(book.askQuantity)) {
+      const totalQuantity = book.bidQuantity + book.askQuantity;
+      if (totalQuantity > 0) {
+        analysis.orderBookPressure = {
+          bidQuantity: book.bidQuantity,
+          askQuantity: book.askQuantity,
+          bidPercent: (book.bidQuantity / totalQuantity) * 100,
+          askPercent: (book.askQuantity / totalQuantity) * 100,
+        };
+      }
     }
-    return analyzeCandles(market.candles, market.orderBook);
+    return analysis;
   }
 
   getAllMarketSnapshots() {
     const markets = SYMBOLS.map((symbol) => this.getMarketSnapshot(symbol));
     const unavailable = markets.find((market) => !market.ready);
     if (unavailable) {
-      const error = new Error(unavailable.candleError || unavailable.orderBookError || `DATA_FEED_OFFLINE: Binance real feed failed for ${unavailable.symbol}`);
+      const error = new Error(unavailable.candleError || `DATA_FEED_OFFLINE: Binance real feed failed for ${unavailable.symbol}: live trade quote is stale`);
       error.status = 503;
       throw error;
     }
+    const analyses = new Map(markets.map((market) => [market.symbol, this.getIndicators(market.symbol)]));
+    const topOpportunities = rankOpportunities(
+      markets
+        .map((market) => ({ symbol: market.symbol, analysis: analyses.get(market.symbol) }))
+        .filter((entry) => entry.analysis.side),
+    );
+    const topRanks = new Map(topOpportunities.map((entry) => [entry.symbol, entry.opportunityRank]));
     return markets.map((market) => ({
       symbol: market.symbol,
       price: market.price,
       priceSource: market.priceSource,
       lastTradeAt: market.lastTradeAt,
       marketAgeMs: market.marketAgeMs,
+      tickCount: market.tickCount,
+      nextCandleCloseAt: market.nextCandleCloseAt,
       candleCount: market.candles.length,
-      orderBook: {
+      orderBook: market.orderBook ? {
         bids: market.orderBook.bids,
         asks: market.orderBook.asks,
         bestBid: market.orderBook.bestBid,
@@ -1056,8 +1122,23 @@ class PaperTradingEngine {
         askNotional: market.orderBook.askNotional,
         levelCount: market.orderBook.levelCount,
         updatedAt: market.orderBook.updatedAt,
+      } : {
+        bids: [],
+        asks: [],
+        bestBid: null,
+        bestAsk: null,
+        bidQuantity: 0,
+        askQuantity: 0,
+        bidNotional: 0,
+        askNotional: 0,
+        levelCount: 0,
+        updatedAt: null,
       },
-      indicators: this.getIndicators(market.symbol),
+      indicators: {
+        ...analyses.get(market.symbol),
+        opportunityRank: topRanks.get(market.symbol) ?? null,
+        isTopOpportunity: topRanks.has(market.symbol),
+      },
     }));
   }
 }

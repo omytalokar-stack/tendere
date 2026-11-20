@@ -1,6 +1,17 @@
 require('dotenv').config();
 
-const SYMBOLS = ['ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'AVAXUSDT'];
+const SYMBOLS = [
+  'BTCUSDT',
+  'ETHUSDT',
+  'SOLUSDT',
+  'BNBUSDT',
+  'XRPUSDT',
+  'DOGEUSDT',
+  'ADAUSDT',
+  'AVAXUSDT',
+  'SUIUSDT',
+  'NEARUSDT',
+];
 const INTERVALS = new Set(['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d']);
 
 function numberFromEnv(name, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
@@ -28,7 +39,7 @@ const restBootstrapSetting = (process.env.BINANCE_REST_BOOTSTRAP_ENABLED || 'tru
 if (restBootstrapSetting !== 'true' && restBootstrapSetting !== 'false') {
   throw new Error('BINANCE_REST_BOOTSTRAP_ENABLED must be true or false');
 }
-const dailyConsecutiveLossLimit = numberFromEnv('DAILY_CONSECUTIVE_LOSS_LIMIT', 2, {
+const dailyConsecutiveLossLimit = numberFromEnv('DAILY_CONSECUTIVE_LOSS_LIMIT', 3, {
   min: 1,
   max: 100,
 });

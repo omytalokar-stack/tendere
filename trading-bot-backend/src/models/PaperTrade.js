@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 
 const paperTradeSchema = new mongoose.Schema(
   {
-    symbol: { type: String, required: true, enum: ['ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'AVAXUSDT'] },
+    symbol: { type: String, required: true, enum: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'DOGEUSDT', 'ADAUSDT', 'AVAXUSDT', 'SUIUSDT', 'NEARUSDT'] },
     side: { type: String, required: true, enum: ['LONG', 'SHORT'] },
     status: { type: String, required: true, enum: ['OPEN', 'CLOSED'], default: 'OPEN' },
     entryPrice: { type: Number, required: true, min: 0 },

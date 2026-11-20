@@ -4,16 +4,21 @@ const {
   BollingerBands,
   EMA,
   MACD,
+  OBV,
   RSI,
+  SMA,
+  StochasticRSI,
 } = require('technicalindicators');
 
-const MIN_CANDLES = 250;
+const REQUIRED_CANDLES = 500;
 const SUPER_TREND_PERIOD = 10;
 const SUPER_TREND_MULTIPLIER = 3;
-const RISK_PERCENT = 0.75;
 const MIN_ENTRY_VOTES = 7;
 const MIN_ENTRY_VOLUME_RATIO = 1.2;
-const MIN_ORDER_BOOK_PRESSURE_PERCENT = 54;
+const MIN_ENTRY_ADX = 22;
+const MAX_LONG_RSI = 68;
+const MIN_SHORT_RSI = 32;
+const TOP_OPPORTUNITIES = 2;
 
 function latest(values) {
   return values.length ? values[values.length - 1] : undefined;
@@ -60,70 +65,66 @@ function calculateSupertrend(candles) {
     if (finalUpper === null) {
       finalUpper = basicUpper;
       finalLower = basicLower;
-      trend = candle.close >= midpoint ? 'BUY' : 'SELL';
+      trend = candle.close >= midpoint ? 'BULLISH' : 'BEARISH';
     } else {
       finalUpper = basicUpper < finalUpper || previousClose > finalUpper ? basicUpper : finalUpper;
       finalLower = basicLower > finalLower || previousClose < finalLower ? basicLower : finalLower;
-      trend = trend === 'SELL'
-        ? (candle.close > finalUpper ? 'BUY' : 'SELL')
-        : (candle.close < finalLower ? 'SELL' : 'BUY');
+      trend = trend === 'BEARISH'
+        ? (candle.close > finalUpper ? 'BULLISH' : 'BEARISH')
+        : (candle.close < finalLower ? 'BEARISH' : 'BULLISH');
     }
-    value = trend === 'BUY' ? finalLower : finalUpper;
+    value = trend === 'BULLISH' ? finalLower : finalUpper;
   }
 
   if (!Number.isFinite(value)) return null;
   return { value, direction: trend };
 }
 
-function getEntrySignal(analysis) {
-  if (!analysis || !Number.isFinite(analysis.volumeRatio)
-    || analysis.volumeRatio < MIN_ENTRY_VOLUME_RATIO
-    || !Number.isFinite(analysis.adx)
-    || analysis.adx < 22
-    || !Number.isFinite(analysis.ema20)
-    || !Number.isFinite(analysis.ema50)) return null;
+function validateCandles(candles) {
+  if (!Array.isArray(candles) || candles.length !== REQUIRED_CANDLES) throw insufficientData();
+  if (!candles.every((candle) => candle.isClosed === true
+    && [candle.openTime, candle.open, candle.high, candle.low, candle.close, candle.volume]
+      .every(Number.isFinite)
+    && candle.open > 0
+    && candle.high >= Math.max(candle.open, candle.close)
+    && candle.low <= Math.min(candle.open, candle.close)
+    && candle.low > 0
+    && candle.close > 0
+    && candle.volume >= 0)) throw insufficientData();
+  if (!candles.slice(1).every((candle, index) =>
+    candle.openTime > candles[index].openTime)) throw insufficientData();
+}
 
-  if (analysis.buyVotes >= MIN_ENTRY_VOTES
-    && analysis.currentPrice > analysis.ema20
+function indicatorDirection(analysis) {
+  const bullishCount = analysis.bullishCount ?? analysis.buyVotes;
+  const bearishCount = analysis.bearishCount ?? analysis.sellVotes;
+  if (bullishCount >= MIN_ENTRY_VOTES
+    && analysis.close > analysis.ema200
     && analysis.ema20 > analysis.ema50
-    && analysis.currentPrice > analysis.ema200
-    && analysis.orderBookPressure?.bidPercent >= MIN_ORDER_BOOK_PRESSURE_PERCENT) return 'LONG';
-  if (analysis.sellVotes >= MIN_ENTRY_VOTES
-    && analysis.currentPrice < analysis.ema20
+    && analysis.adx >= 20
+    && analysis.pdi > analysis.mdi
+    && analysis.adx > MIN_ENTRY_ADX
+    && analysis.volumeRatio >= MIN_ENTRY_VOLUME_RATIO
+    && analysis.rsi <= MAX_LONG_RSI) return 'LONG';
+  if (bearishCount >= MIN_ENTRY_VOTES
+    && analysis.close < analysis.ema200
     && analysis.ema20 < analysis.ema50
-    && analysis.currentPrice < analysis.ema200
-    && analysis.orderBookPressure?.askPercent >= MIN_ORDER_BOOK_PRESSURE_PERCENT) return 'SHORT';
+    && analysis.adx >= 20
+    && analysis.mdi > analysis.pdi
+    && analysis.adx > MIN_ENTRY_ADX
+    && analysis.volumeRatio >= MIN_ENTRY_VOLUME_RATIO
+    && analysis.rsi >= MIN_SHORT_RSI) return 'SHORT';
   return null;
 }
 
-function getConfirmedEntrySignal(analysis, confirmationAnalysis) {
-  const direction = getEntrySignal(analysis);
-  return direction && getEntrySignal(confirmationAnalysis) === direction ? direction : null;
-}
-
-function analyzeCandles(candles, orderBook) {
-  if (!Array.isArray(candles) || candles.length < MIN_CANDLES) throw insufficientData();
-  if (!candles.every((candle) => candle.isFinal === true
-    && [candle.openTime, candle.open, candle.high, candle.low, candle.close, candle.volume]
-      .every(Number.isFinite)
-    && candle.open > 0 && candle.high > 0 && candle.low > 0 && candle.close > 0 && candle.volume >= 0)) {
-    throw insufficientData();
-  }
-  if (!orderBook || !Array.isArray(orderBook.bids) || !Array.isArray(orderBook.asks)
-    || orderBook.bids.length < 20 || orderBook.asks.length < 20
-    || !Number.isFinite(orderBook.bidQuantity) || !Number.isFinite(orderBook.askQuantity)) {
-    const error = new Error('ORDERBOOK_DISCONNECTED');
-    error.code = 'ORDERBOOK_DISCONNECTED';
-    throw error;
-  }
+function analyzeCandles(candles) {
+  validateCandles(candles);
 
   const close = candles.map((candle) => candle.close);
   const high = candles.map((candle) => candle.high);
   const low = candles.map((candle) => candle.low);
   const volume = candles.map((candle) => candle.volume);
-  const currentCandle = candles[candles.length - 1];
-  const previousClose = close[close.length - 2];
-  const currentClose = currentCandle.close;
+  const latestCandle = candles[candles.length - 1];
   const rsi = latest(RSI.calculate({ values: close, period: 14 }));
   const ema20 = latest(EMA.calculate({ values: close, period: 20 }));
   const ema50 = latest(EMA.calculate({ values: close, period: 50 }));
@@ -139,88 +140,143 @@ function analyzeCandles(candles, orderBook) {
   const bands = latest(BollingerBands.calculate({ values: close, period: 20, stdDev: 2 }));
   const atr = latest(ATR.calculate({ high, low, close, period: 14 }));
   const adx = latest(ADX.calculate({ high, low, close, period: 14 }));
-  const vwap = calculateVwap(candles);
+  const stochasticRsi = latest(StochasticRSI.calculate({
+    values: close,
+    rsiPeriod: 14,
+    stochasticPeriod: 14,
+    kPeriod: 3,
+    dPeriod: 3,
+  }));
+  const obvSeries = OBV.calculate({ close, volume });
+  const obv = latest(obvSeries);
+  const obvSma20 = latest(SMA.calculate({ values: obvSeries, period: 20 }));
   const supertrend = calculateSupertrend(candles);
-  const previous20Volumes = volume.slice(-21, -1);
-  if (previous20Volumes.length !== 20) throw insufficientData();
-  const averageVolume = previous20Volumes.reduce((sum, value) => sum + value, 0) / 20;
-  const currentVolume = currentCandle.volume;
+  const priorVolumes = volume.slice(-21, -1);
+  if (priorVolumes.length !== 20) throw insufficientData();
+  const averageVolume = priorVolumes.reduce((sum, item) => sum + item, 0) / priorVolumes.length;
+  const currentVolume = latestCandle.volume;
   const volumeRatio = averageVolume > 0 ? currentVolume / averageVolume : null;
-  const bidAskTotal = orderBook.bidQuantity + orderBook.askQuantity;
+  const percentB = bands && bands.upper !== bands.lower
+    ? (latestCandle.close - bands.lower) / (bands.upper - bands.lower)
+    : null;
 
-  const calculatedValues = [
-    rsi, ema20, ema50, ema200, macd?.histogram, bands?.middle, atr,
-    adx?.adx, adx?.pdi, adx?.mdi, vwap, supertrend?.value, averageVolume, volumeRatio,
+  const requiredValues = [
+    rsi, ema20, ema50, ema200, macd?.MACD, macd?.signal, macd?.histogram,
+    bands?.middle, bands?.upper, bands?.lower, percentB, atr, adx?.adx, adx?.pdi,
+    adx?.mdi, stochasticRsi?.k, stochasticRsi?.d, obv, obvSma20, supertrend?.value,
+    averageVolume, volumeRatio,
   ];
-  if (!calculatedValues.every(Number.isFinite) || averageVolume <= 0 || bidAskTotal <= 0) {
-    throw new Error('INVALID_LIVE_MARKET_DATA: Binance closed-candle indicators could not be calculated');
+  if (!requiredValues.every(Number.isFinite) || averageVolume <= 0) {
+    throw new Error('INVALID_LIVE_MARKET_DATA: closed-candle indicators could not be calculated');
   }
 
-  const votes = [
-    { name: 'RSI-14', value: rsi, vote: rsi <= 35 ? 'BUY' : rsi >= 65 ? 'SELL' : 'NEUTRAL' },
-    { name: 'MACD', value: macd.histogram, vote: macd.histogram > 0 ? 'BUY' : macd.histogram < 0 ? 'SELL' : 'NEUTRAL' },
-    { name: 'EMA-20/50', value: { ema20, ema50 }, vote: ema20 > ema50 ? 'BUY' : ema20 < ema50 ? 'SELL' : 'NEUTRAL' },
-    { name: 'EMA-200', value: ema200, vote: currentClose > ema200 ? 'BUY' : currentClose < ema200 ? 'SELL' : 'NEUTRAL' },
-    { name: 'Supertrend-10/3', value: supertrend.value, vote: supertrend.direction },
-    { name: 'Bollinger-20/2', value: bands, vote: currentClose > bands.middle ? 'BUY' : currentClose < bands.middle ? 'SELL' : 'NEUTRAL' },
-    { name: 'ATR-14', value: atr, vote: 'NEUTRAL' },
-    { name: 'ADX-14', value: adx.adx, vote: adx.adx >= 20 ? (adx.pdi > adx.mdi ? 'BUY' : adx.mdi > adx.pdi ? 'SELL' : 'NEUTRAL') : 'NEUTRAL' },
-    { name: 'VWAP-500', value: vwap, vote: currentClose > vwap ? 'BUY' : currentClose < vwap ? 'SELL' : 'NEUTRAL' },
-    { name: 'Volume-vs-20', value: { currentVolume, averageVolume, ratio: volumeRatio }, vote: volumeRatio >= 1.15 && currentClose > previousClose ? 'BUY' : volumeRatio >= 1.15 && currentClose < previousClose ? 'SELL' : 'NEUTRAL' },
-  ];
-  const buyVotes = votes.filter((vote) => vote.vote === 'BUY').length;
-  const sellVotes = votes.filter((vote) => vote.vote === 'SELL').length;
+  const stochasticDirection = stochasticRsi.k < 20 && stochasticRsi.k > stochasticRsi.d
+    ? 'BULLISH'
+    : stochasticRsi.k > 80 && stochasticRsi.k < stochasticRsi.d
+      ? 'BEARISH'
+      : stochasticRsi.k > stochasticRsi.d
+        ? 'BULLISH'
+        : stochasticRsi.k < stochasticRsi.d ? 'BEARISH' : 'NEUTRAL';
+  const volumeSpikeDirection = volumeRatio >= 1.15
+    ? latestCandle.close > candles[candles.length - 2].close
+      ? 'BULLISH'
+      : latestCandle.close < candles[candles.length - 2].close ? 'BEARISH' : 'NEUTRAL'
+    : 'NEUTRAL';
+  const adxDirection = adx.adx >= 20
+    ? adx.pdi > adx.mdi ? 'BULLISH' : adx.mdi > adx.pdi ? 'BEARISH' : 'NEUTRAL'
+    : 'NEUTRAL';
+  const indicators = [
+    { name: 'EMA-200 macro trend', value: ema200, direction: latestCandle.close > ema200 ? 'BULLISH' : latestCandle.close < ema200 ? 'BEARISH' : 'NEUTRAL', weight: 1 },
+    { name: 'EMA-20/50 ribbon', value: { ema20, ema50 }, direction: ema20 > ema50 ? 'BULLISH' : ema20 < ema50 ? 'BEARISH' : 'NEUTRAL', weight: 1 },
+    { name: 'Supertrend-10/3', value: supertrend, direction: supertrend.direction, weight: 1 },
+    { name: 'RSI-14', value: rsi, direction: rsi <= 35 ? 'BULLISH' : rsi >= 65 ? 'BEARISH' : 'NEUTRAL', weight: 1 },
+    { name: 'MACD-12/26/9', value: macd, direction: macd.histogram > 0 ? 'BULLISH' : macd.histogram < 0 ? 'BEARISH' : 'NEUTRAL', weight: 1 },
+    { name: 'Stoch RSI-14/14/3/3', value: stochasticRsi, direction: stochasticDirection, weight: 1 },
+    { name: 'Bollinger-20/2', value: { ...bands, percentB }, direction: percentB > 0.5 && latestCandle.close > bands.middle ? 'BULLISH' : percentB < 0.5 && latestCandle.close < bands.middle ? 'BEARISH' : 'NEUTRAL', weight: 1 },
+    { name: 'ADX/+DI/-DI-14', value: adx, direction: adxDirection, weight: 1 },
+    { name: 'OBV vs SMA-20', value: { obv, obvSma20 }, direction: obv > obvSma20 ? 'BULLISH' : obv < obvSma20 ? 'BEARISH' : 'NEUTRAL', weight: 1 },
+    { name: 'ATR-14 + candle body', value: { atr, body: latestCandle.close - latestCandle.open }, direction: latestCandle.close > latestCandle.open ? 'BULLISH' : latestCandle.close < latestCandle.open ? 'BEARISH' : 'NEUTRAL', weight: 1 },
+  ].map((indicator) => ({
+    ...indicator,
+    vote: indicator.direction === 'BULLISH'
+      ? 'BUY'
+      : indicator.direction === 'BEARISH' ? 'SELL' : 'NEUTRAL',
+  }));
+  const bullishCount = indicators.filter((item) => item.direction === 'BULLISH').length;
+  const bearishCount = indicators.filter((item) => item.direction === 'BEARISH').length;
   const analysis = {
+    symbol: latestCandle.symbol || null,
     side: null,
-    buyVotes,
-    sellVotes,
-    totalVotes: votes.length,
-    currentPrice: currentClose,
+    bullishCount,
+    bearishCount,
+    buyVotes: bullishCount,
+    sellVotes: bearishCount,
+    totalVotes: indicators.length,
+    close: latestCandle.close,
+    currentPrice: latestCandle.close,
     ema20,
     ema50,
     ema200,
     atr,
     rsi,
     adx: adx.adx,
-    vwap,
+    pdi: adx.pdi,
+    mdi: adx.mdi,
+    vwap: calculateVwap(candles),
     supertrend,
+    stochasticRsi,
+    macd,
+    bollinger: { ...bands, percentB },
+    obv,
+    obvSma20,
     currentVolume,
     averageVolume,
     volumeRatio,
-    orderBookPressure: {
-      bidQuantity: orderBook.bidQuantity,
-      askQuantity: orderBook.askQuantity,
-      bidPercent: (orderBook.bidQuantity / bidAskTotal) * 100,
-      askPercent: (orderBook.askQuantity / bidAskTotal) * 100,
-    },
-    indicators: votes,
-    strategy: '10-source Binance closed-candle consensus with L2 gate',
+    volumeSpikeRatio: volumeRatio,
+    opportunityScore: volumeRatio * adx.adx,
+    indicators,
+    strategy: 'QuantConsensus 10-source closed-candle engine',
   };
-  analysis.side = getEntrySignal(analysis);
+  analysis.side = indicatorDirection(analysis);
   return analysis;
 }
 
-function sizePosition({ balance, entryPrice, stopLoss, leverage }) {
-  if (![balance, entryPrice, stopLoss, leverage]
-    .every(Number.isFinite)
-    || balance <= 0
-    || entryPrice <= 0
-    || stopLoss <= 0
-    || leverage < 1) {
+function rankOpportunities(opportunities, limit = TOP_OPPORTUNITIES) {
+  return [...opportunities]
+    .map((item) => ({
+      ...item,
+      opportunityScore: Number(item.opportunityScore ?? item.analysis?.opportunityScore),
+    }))
+    .filter((item) => Number.isFinite(item.opportunityScore))
+    .sort((left, right) => right.opportunityScore - left.opportunityScore
+      || left.symbol.localeCompare(right.symbol))
+    .slice(0, limit)
+    .map((item, index) => ({ ...item, opportunityRank: index + 1, isTopOpportunity: true }));
+}
+
+function getEntrySignal(analysis) {
+  return indicatorDirection(analysis);
+}
+
+function getConfirmedEntrySignal(analysis, confirmationAnalysis) {
+  const direction = getEntrySignal(analysis);
+  return direction && getEntrySignal(confirmationAnalysis) === direction ? direction : null;
+}
+
+function sizePosition({ availableMargin, entryPrice, maxAllocation = 2500 }) {
+  if (![availableMargin, entryPrice, maxAllocation].every(Number.isFinite)
+    || availableMargin <= 0 || entryPrice <= 0 || maxAllocation <= 0) {
     throw new Error('Invalid inputs for paper position sizing');
   }
-  const stopDistance = Math.abs(entryPrice - stopLoss);
-  if (stopDistance <= 0) throw new Error('Stop-loss distance must be positive');
-
-  const riskBudget = balance * (RISK_PERCENT / 100);
-  const quantity = Number((riskBudget / stopDistance).toFixed(8));
-  const margin = (quantity * entryPrice) / leverage;
-
+  const allocatedMargin = Math.min(availableMargin * 0.25, maxAllocation);
+  const quantity = Number((allocatedMargin / entryPrice).toFixed(8));
+  if (!Number.isFinite(quantity) || quantity <= 0) {
+    throw new Error('Paper position size must be positive');
+  }
   return {
-    margin: Number(margin.toFixed(8)),
+    margin: Number(allocatedMargin.toFixed(8)),
     quantity,
-    maxRiskUsd: Number((quantity * stopDistance).toFixed(8)),
-    riskBudgetUsd: Number(riskBudget.toFixed(8)),
+    allocatedMargin: Number(allocatedMargin.toFixed(8)),
   };
 }
 
@@ -228,12 +284,16 @@ module.exports = {
   analyzeCandles,
   getEntrySignal,
   getConfirmedEntrySignal,
+  rankOpportunities,
   sizePosition,
-  MIN_CANDLES,
-  RISK_PERCENT,
+  REQUIRED_CANDLES,
+  MIN_CANDLES: REQUIRED_CANDLES,
   MIN_ENTRY_VOTES,
   MIN_ENTRY_VOLUME_RATIO,
-  MIN_ORDER_BOOK_PRESSURE_PERCENT,
+  MIN_ENTRY_ADX,
+  MAX_LONG_RSI,
+  MIN_SHORT_RSI,
+  TOP_OPPORTUNITIES,
   calculateVwap,
   calculateSupertrend,
 };

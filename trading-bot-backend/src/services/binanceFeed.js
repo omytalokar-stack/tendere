@@ -199,7 +199,8 @@ class BinanceFeed {
       close: Number(row[4]),
       volume: Number(row[5]),
       isFinal: Number(row[6]) < Date.now(),
-    })).filter((candle) => candle.isFinal
+      isClosed: Number(row[6]) < Date.now(),
+    })).filter((candle) => candle.isClosed
       && [candle.openTime, candle.closeTime, candle.open, candle.high, candle.low, candle.close, candle.volume]
         .every(Number.isFinite)
       && candle.open > 0
@@ -304,9 +305,13 @@ class BinanceFeed {
       return dataError(symbol, `unsupported candle interval ${interval}`).message;
     }
     const contiguous = candles.slice(1).every((item, index) =>
-      candles[index].closeTime + 1 === item.openTime);
+      candles[index].closeTime + 1 === item.openTime
+      && item.isClosed === true);
     if (candles.length !== REQUIRED_CANDLES) {
       return dataError(symbol, `expected ${REQUIRED_CANDLES} completed candles, received ${candles.length}`).message;
+    }
+    if (!candles.every((candle) => candle.isClosed === true)) {
+      return dataError(symbol, 'candle history contains an unfinished candle').message;
     }
     if (!contiguous) {
       return dataError(symbol, 'completed candle history contains a time gap').message;
@@ -424,6 +429,7 @@ class BinanceFeed {
         close: Number(event.k.c),
         volume: Number(event.k.v),
         isFinal: Boolean(event.k.x),
+        isClosed: Boolean(event.k.x),
       };
       if (![candle.openTime, candle.closeTime, candle.open, candle.high, candle.low, candle.close, candle.volume]
         .every(Number.isFinite)

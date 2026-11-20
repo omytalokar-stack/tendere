@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   ArrowLeft,
@@ -16,9 +16,14 @@ import {
   Smartphone,
   Sparkles,
   Wallet,
+  Volume2,
+  VolumeX,
   X,
 } from 'lucide-react';
-import { TradingViewProModal } from './components/TradingViewProModal';
+import { LocalPaperWallet } from './components/LocalPaperWallet';
+import { MarketTerminal, type TerminalQuote } from './components/MarketTerminal';
+import { OpportunityScreener } from './components/OpportunityScreener';
+import { connectBinanceStream } from './services/binanceMarketData';
 import {
   closePaperTrade,
   getBackendAudit,
@@ -33,20 +38,36 @@ import {
 } from './services/backendApi';
 import {
   areBrowserAlertsEnabled,
+  celebrate,
   disableBrowserAlerts,
   enableBrowserAlerts,
+  isAudioMuted,
   notifyTradeClosed,
   notifyTradeCooldown,
   notifyTradeOpened,
+  setAudioMuted,
 } from './services/notificationService';
+import {
+  adjustLocalEquity,
+  bookLocalTrade,
+  closeLocalPosition,
+  loadLocalAccount,
+  processLocalPriceTick,
+  updateLocalAccount,
+  type LocalPaperAccount,
+} from './utils/browserDatabase';
 
 const COINS = [
+  { id: 'BTC', symbol: 'BTCUSDT', name: 'Bitcoin', decimals: 2, color: '#f7931a' },
   { id: 'ETH', symbol: 'ETHUSDT', name: 'Ethereum', decimals: 2, color: '#a78bfa' },
   { id: 'SOL', symbol: 'SOLUSDT', name: 'Solana', decimals: 2, color: '#ec4899' },
   { id: 'BNB', symbol: 'BNBUSDT', name: 'BNB', decimals: 2, color: '#f59e0b' },
   { id: 'XRP', symbol: 'XRPUSDT', name: 'XRP', decimals: 4, color: '#38bdf8' },
+  { id: 'DOGE', symbol: 'DOGEUSDT', name: 'Dogecoin', decimals: 5, color: '#eab308' },
   { id: 'ADA', symbol: 'ADAUSDT', name: 'Cardano', decimals: 4, color: '#2dd4bf' },
   { id: 'AVAX', symbol: 'AVAXUSDT', name: 'Avalanche', decimals: 2, color: '#f43f5e' },
+  { id: 'SUI', symbol: 'SUIUSDT', name: 'Sui', decimals: 4, color: '#38bdf8' },
+  { id: 'NEAR', symbol: 'NEARUSDT', name: 'NEAR Protocol', decimals: 3, color: '#a3e635' },
 ] as const;
 
 type Tab = 'home' | 'strategy' | 'health' | 'wallet';
@@ -76,18 +97,11 @@ function formatUsd(value: number) {
   return value.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
 }
 
-function pnlFor(trade: BackendTrade, markPrice: number, takerFeeRate: number) {
+function pnlFor(trade: BackendTrade, markPrice: number) {
   const direction = trade.side === 'LONG' ? 1 : -1;
-  const initialQuantity = trade.initialQuantity ?? trade.quantity;
   const remainingQuantity = trade.remainingQuantity ?? trade.quantity;
   const grossPnlUsd = direction * (markPrice - trade.entryPrice) * remainingQuantity;
-  const remainingEntryFeeUsd = (trade.entryFeeUsd ?? 0)
-    * (initialQuantity > 0 ? remainingQuantity / initialQuantity : 1);
-  const estimatedExitFeeUsd = markPrice * remainingQuantity * takerFeeRate;
-  const pnlUsd = (trade.realizedPnl ?? 0)
-    + grossPnlUsd
-    - remainingEntryFeeUsd
-    - estimatedExitFeeUsd;
+  const pnlUsd = (trade.realizedPnl ?? 0) + grossPnlUsd;
   return {
     pnlUsd,
     pnlPercent: trade.margin > 0 ? (pnlUsd / trade.margin) * 100 : 0,
@@ -103,6 +117,10 @@ export default function App() {
   const [snapshot, setSnapshot] = useState<BackendSnapshot | null>(null);
   const [auditEvents, setAuditEvents] = useState<BackendAuditEvent[]>([]);
   const [backendError, setBackendError] = useState('');
+  const [localAccount, setLocalAccount] = useState<LocalPaperAccount | null>(null);
+  const [localAccountError, setLocalAccountError] = useState('');
+  const [localPrices, setLocalPrices] = useState<Record<string, { value: number; at: number }>>({});
+  const [terminalQuote, setTerminalQuote] = useState<TerminalQuote | null>(null);
   const [auditError, setAuditError] = useState('');
   const [loading, setLoading] = useState(true);
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
@@ -110,15 +128,31 @@ export default function App() {
   const [chartCandles, setChartCandles] = useState<BackendCandle[]>([]);
   const [chartError, setChartError] = useState('');
   const [chartLoading, setChartLoading] = useState(false);
-  const [chartOpen, setChartOpen] = useState(false);
   const [actionError, setActionError] = useState('');
   const [actionPending, setActionPending] = useState<string | null>(null);
   const [closeConfirmation, setCloseConfirmation] = useState<BackendTrade | null>(null);
   const [alertsEnabled, setAlertsEnabled] = useState(areBrowserAlertsEnabled);
+  const [audioMuted, setAudioMutedState] = useState(isAudioMuted);
   const tradeStatuses = useRef(new Map<string, BackendTrade['status']>());
+  const tp1Statuses = useRef(new Map<string, boolean>());
   const hasTradeBaseline = useRef(false);
   const notificationBaselineAt = useRef<number | null>(null);
+  const opportunityBaseline = useRef<Set<string> | null>(null);
   const installPrompt = useRef<BeforeInstallPromptEvent | null>(null);
+
+  useEffect(() => {
+    let disposed = false;
+    loadLocalAccount()
+      .then((account) => {
+        if (!disposed) setLocalAccount(account);
+      })
+      .catch((error: unknown) => {
+        if (!disposed) setLocalAccountError(error instanceof Error ? error.message : 'Local IndexedDB account is unavailable.');
+      });
+    return () => {
+      disposed = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!('serviceWorker' in navigator)) return;
@@ -202,6 +236,7 @@ export default function App() {
             const baselineAt = notificationBaselineAt.current ?? Date.now();
             for (const trade of nextSnapshot.trades) {
               const previousStatus = previousStatuses.get(trade._id);
+              const previousTp1Filled = tp1Statuses.current.get(trade._id) ?? false;
               const openedAfterBaseline = Date.parse(trade.openedAt) > baselineAt;
               const closedAfterBaseline = Boolean(
                 trade.closedAt && Date.parse(trade.closedAt) > baselineAt,
@@ -222,26 +257,44 @@ export default function App() {
               if (trade.status === 'CLOSED'
                 && (previousStatus === 'OPEN' || (previousStatus === undefined && closedAfterBaseline))) {
                 notify(notifyTradeClosed(trade));
+                if (trade.pnlUsd > 0) celebrate('profit');
                 if (trade.closeReason === 'STOP_LOSS'
                   && trade.pnlUsd < 0
                   && trade.cooldownUntil) {
                   notify(notifyTradeCooldown(trade));
                 }
               }
+              if (trade.status === 'OPEN'
+                && trade.tp1Filled
+                && !previousTp1Filled
+                && (trade.realizedPnl ?? 0) > 0) {
+                celebrate('profit');
+              }
               previousStatuses.set(trade._id, trade.status);
+              tp1Statuses.current.set(trade._id, Boolean(trade.tp1Filled));
             }
             while (tradeStatuses.current.size > 500) {
               const oldestTradeId = tradeStatuses.current.keys().next().value;
               if (oldestTradeId === undefined) break;
               tradeStatuses.current.delete(oldestTradeId);
+              tp1Statuses.current.delete(oldestTradeId);
             }
           } else {
             notificationBaselineAt.current = Date.now();
             for (const trade of nextSnapshot.trades) {
               tradeStatuses.current.set(trade._id, trade.status);
+              tp1Statuses.current.set(trade._id, Boolean(trade.tp1Filled));
             }
             hasTradeBaseline.current = true;
           }
+          const currentTopTwo = new Set(nextSnapshot.markets
+            .filter((market) => market.indicators.isTopOpportunity)
+            .map((market) => market.symbol));
+          if (opportunityBaseline.current
+            && [...currentTopTwo].some((symbol) => !opportunityBaseline.current?.has(symbol))) {
+            celebrate('opportunity');
+          }
+          opportunityBaseline.current = currentTopTwo;
           setSnapshot(nextSnapshot);
           setBackendError('');
           setLatencyMs(Math.round(performance.now() - started));
@@ -277,12 +330,74 @@ export default function App() {
   );
   const selectedMarket = snapshot?.markets.find((market) => market.symbol === selectedSymbol) ?? null;
 
+  const handleLocalPriceTick = useCallback((symbol: string, price: number, eventTime: number) => {
+    setLocalPrices((current) => ({ ...current, [symbol]: { value: price, at: eventTime } }));
+    let profitableMilestones = 0;
+    void updateLocalAccount((account) => {
+      const result = processLocalPriceTick(account, symbol, price);
+      profitableMilestones = result.closedProfit.length;
+      return result.account;
+    })
+      .then((account) => {
+        setLocalAccount(account);
+        for (let index = 0; index < profitableMilestones; index += 1) celebrate('profit');
+      })
+      .catch((error: unknown) => {
+        setLocalAccountError(error instanceof Error ? error.message : 'Local paper position update failed.');
+      });
+  }, []);
+
+  const localOpenSymbols = [...new Set(
+    (localAccount?.trades ?? [])
+      .filter((trade) => trade.status === 'OPEN')
+      .map((trade) => trade.symbol),
+  )].sort();
+  const localOpenSymbolsKey = localOpenSymbols.join(',');
+
+  useEffect(() => {
+    if (snapshot || !localAccount || !localOpenSymbolsKey) return;
+    const disconnectors = localOpenSymbols.map((symbol) => connectBinanceStream(symbol, '5m', {
+      onConnectionChange: () => undefined,
+      onPrice: (price, eventTime) => handleLocalPriceTick(symbol, price, eventTime),
+      onCandle: () => undefined,
+      onError: (message) => console.warn(`Local paper price stream ${symbol}: ${message}`),
+    }));
+    return () => disconnectors.forEach((disconnect) => disconnect());
+  }, [snapshot === null, localAccount !== null, localOpenSymbolsKey, handleLocalPriceTick]);
+
+  const handleLocalBook = useCallback(async (
+    symbol: string,
+    side: 'LONG' | 'SHORT',
+    price: number,
+    atr: number,
+  ) => {
+    const account = await updateLocalAccount((current) => bookLocalTrade(current, symbol, side, price, atr));
+    setLocalAccount(account);
+    setLocalAccountError('');
+  }, []);
+
+  const handleLocalClose = useCallback(async (tradeId: string, price: number) => {
+    let profitable = false;
+    const account = await updateLocalAccount((current) => {
+      const updated = closeLocalPosition(current, tradeId, price);
+      profitable = (updated.trades.find((trade) => trade.id === tradeId)?.realizedPnl ?? 0) > 0;
+      return updated;
+    });
+    setLocalAccount(account);
+    if (profitable) celebrate('profit');
+  }, []);
+
+  const handleLocalEquityAdjust = useCallback(async (balance: number) => {
+    const account = await updateLocalAccount((current) => adjustLocalEquity(current, balance));
+    setLocalAccount(account);
+    setLocalAccountError('');
+  }, []);
+
   useEffect(() => {
     if (!selectedCoin) {
       setChartCandles([]);
       setChartError('');
       setChartLoading(false);
-      setChartOpen(false);
       return;
     }
     if (!snapshot) {
@@ -361,6 +476,15 @@ export default function App() {
     setActionError(result.message);
   }
 
+  function handleAudioToggle() {
+    const nextMuted = !audioMuted;
+    if (!setAudioMuted(nextMuted)) {
+      setActionError('Browser storage is unavailable; audio preference could not be saved.');
+      return;
+    }
+    setAudioMutedState(nextMuted);
+  }
+
   return (
     <div className="relative min-h-screen overflow-x-hidden pb-28 text-slate-100" style={rootStyle}>
       <div className="pointer-events-none fixed inset-0 z-0 overflow-hidden">
@@ -380,6 +504,16 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleAudioToggle}
+              aria-label={audioMuted ? 'Unmute audio feedback' : 'Mute audio feedback'}
+              title={audioMuted ? 'Unmute audio feedback' : 'Mute audio feedback'}
+              className="flex items-center gap-1.5 rounded-full border border-purple-400/15 bg-purple-950/30 px-3 py-1.5 text-[11px] text-slate-300 hover:text-white"
+            >
+              {audioMuted ? <VolumeX className="h-3.5 w-3.5" /> : <Volume2 className="h-3.5 w-3.5" />}
+              <span>{audioMuted ? 'Audio muted' : 'Audio on'}</span>
+            </button>
             <button
               type="button"
               onClick={() => void handleAlertsToggle()}
@@ -405,6 +539,12 @@ export default function App() {
       </header>
 
       <main className="relative z-10 mx-auto max-w-5xl px-4 pt-5">
+        <div className="mb-4 rounded-2xl border border-amber-300/20 bg-amber-500/[0.05] p-3 text-[10px] leading-relaxed text-amber-100/80">
+          Paper trading only. All positions, fills, P&amp;L, stop-losses, and take-profits are simulated; no orders are sent to Binance.
+        </div>
+        <MarketTerminal onQuoteChange={setTerminalQuote} />
+        <OpportunityScreener />
+
         {backendError && (
           <div role="alert" className="mb-5 flex items-start gap-3 rounded-2xl border border-pink-400/30 bg-pink-950/30 p-4 text-sm text-pink-100 shadow-[0_0_24px_rgba(236,72,153,.08)]">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-pink-300" />
@@ -428,7 +568,6 @@ export default function App() {
             trades={openTrades}
             markets={snapshot?.markets ?? []}
             realizedPnl={snapshot?.wallet.totalRealizedPnl ?? null}
-            takerFeeRate={snapshot?.status.takerFeeRate ?? 0}
             pendingAction={actionPending}
             onClose={(trade) => setCloseConfirmation(trade)}
             onScan={() => setActiveTab('strategy')}
@@ -447,9 +586,8 @@ export default function App() {
             candleError={chartError}
             onSelect={(symbol) => {
               setSelectedSymbol((current) => current === symbol ? null : symbol);
-              setChartOpen(false);
             }}
-            onOpenChart={() => setChartOpen(true)}
+            onOpenChart={() => window.dispatchEvent(new Event('auraalgo:open-terminal-chart'))}
           />
         )}
 
@@ -480,6 +618,13 @@ export default function App() {
                 loading={loading}
                 closedTrades={closedTrades}
                 startingBalance={startingBalance}
+                localAccount={localAccount}
+                localAccountError={localAccountError}
+                localPrices={localPrices}
+                terminalQuote={terminalQuote}
+                onLocalBook={handleLocalBook}
+                onLocalClose={handleLocalClose}
+                onLocalEquityAdjust={handleLocalEquityAdjust}
                 onOpenSettings={() => {
                   setInstallMessage('');
                   setWalletSettingsOpen(true);
@@ -487,18 +632,6 @@ export default function App() {
               />
         )}
       </main>
-
-      {selectedCoin && chartOpen && (
-        <TradingViewProModal
-          isOpen
-          onClose={() => setChartOpen(false)}
-          coin={selectedCoin}
-          candles={chartCandles}
-          market={selectedMarket}
-          loading={chartLoading}
-          error={chartError}
-        />
-      )}
 
       {closeConfirmation && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4">
@@ -554,7 +687,6 @@ function HomeTab({
   trades,
   markets,
   realizedPnl,
-  takerFeeRate,
   pendingAction,
   onClose,
   onScan,
@@ -564,7 +696,6 @@ function HomeTab({
   trades: BackendTrade[];
   markets: BackendMarket[];
   realizedPnl: number | null;
-  takerFeeRate: number;
   pendingAction: string | null;
   onClose: (trade: BackendTrade) => void;
   onScan: () => void;
@@ -618,7 +749,7 @@ function HomeTab({
           Resting in cash until the backend confirms a real Binance signal. No open position, no exposure.
         </p>
         <button onClick={onScan} className="mt-7 rounded-2xl border border-purple-400/20 bg-purple-500/10 px-5 py-3 text-xs font-medium text-purple-100 transition hover:border-pink-300/30 hover:bg-purple-500/15">
-          Peek at the six-coin scanner
+          Peek at the ten-coin scanner
         </button>
       </section>
     );
@@ -630,7 +761,7 @@ function HomeTab({
         const coin = COINS.find((item) => item.symbol === trade.symbol);
         const market = markets.find((item) => item.symbol === trade.symbol);
         if (!coin || !market) return null;
-        const pnl = pnlFor(trade, market.price, takerFeeRate);
+        const pnl = pnlFor(trade, market.price);
         const progress = trade.side === 'LONG'
           ? ((market.price - trade.stopLoss) / (trade.takeProfit - trade.stopLoss)) * 100
           : ((trade.stopLoss - market.price) / (trade.stopLoss - trade.takeProfit)) * 100;
@@ -668,7 +799,7 @@ function HomeTab({
                 <span className="text-2xl font-bold">{pnl.pnlUsd >= 0 ? '+' : ''}{formatUsd(pnl.pnlUsd)}</span>
                 <span className="text-sm">{pnl.pnlPercent >= 0 ? '+' : ''}{pnl.pnlPercent.toFixed(2)}%</span>
               </div>
-              <p className="mt-2 text-[10px] text-slate-500">Includes entry fee and estimated {(takerFeeRate * 100).toFixed(3)}% exit fee · Wallet realized: {realizedPnl === null ? '—' : formatUsd(realizedPnl)}</p>
+              <p className="mt-2 text-[10px] text-slate-500">Clean simulated fill estimate · Wallet realized: {realizedPnl === null ? '—' : formatUsd(realizedPnl)}</p>
             </div>
 
             <div className="mt-5 rounded-2xl border border-purple-400/10 bg-black/15 p-4">
@@ -725,13 +856,18 @@ function StrategyTab({
   onOpenChart: () => void;
 }) {
   if (loading) return <div className="space-y-4"><SkeletonCard /><SkeletonCard /><SkeletonCard /></div>;
+  const bidQuantity = selectedMarket?.orderBook.bids.reduce((total, level) => total + level.quantity, 0) ?? 0;
+  const askQuantity = selectedMarket?.orderBook.asks.reduce((total, level) => total + level.quantity, 0) ?? 0;
+  const totalBookQuantity = bidQuantity + askQuantity;
+  const bidPercent = totalBookQuantity > 0 ? (bidQuantity / totalBookQuantity) * 100 : 0;
+  const askPercent = totalBookQuantity > 0 ? (askQuantity / totalBookQuantity) * 100 : 0;
   return (
     <div className="space-y-5 pb-4">
       <section className="rounded-3xl border border-purple-400/15 bg-white/[0.025] p-5 backdrop-blur-xl">
         <div className="mb-4 flex items-end justify-between gap-3">
           <div>
             <p className="text-[10px] font-mono uppercase tracking-[.2em] text-pink-300/70">Live scanner</p>
-            <h2 className="mt-1 text-xl font-bold text-white">Six-coin matrix</h2>
+            <h2 className="mt-1 text-xl font-bold text-white">Ten-coin matrix</h2>
           </div>
           <span className="text-[10px] text-slate-500">Real Binance · closed-candle signals</span>
         </div>
@@ -753,9 +889,16 @@ function StrategyTab({
               >
                 <div className="flex items-center justify-between">
                   <span className="font-bold" style={{ color: coin.color }}>{coin.id}/USDT</span>
-                  <span className={`rounded-full px-2 py-1 text-[9px] font-mono ${side ? 'bg-pink-500/10 text-pink-200' : 'bg-slate-800/80 text-slate-400'}`}>
-                    {side ?? 'NEUTRAL'}
-                  </span>
+                  <div className="flex items-center gap-1">
+                    {market.indicators.isTopOpportunity && (
+                      <span className="rounded-full bg-amber-400/15 px-2 py-1 text-[8px] font-mono font-bold text-amber-200">
+                        TOP {market.indicators.opportunityRank}
+                      </span>
+                    )}
+                    <span className={`rounded-full px-2 py-1 text-[9px] font-mono ${side ? 'bg-pink-500/10 text-pink-200' : 'bg-slate-800/80 text-slate-400'}`}>
+                      {side ?? 'NEUTRAL'}
+                    </span>
+                  </div>
                 </div>
                 <p className="mt-3 font-mono text-lg text-white">${formatPrice(market.price, coin.decimals)}</p>
                 {market.priceSource === 'ORDER_BOOK_MID' && <p className="mt-1 text-[9px] text-slate-500">Live L2 midpoint</p>}
@@ -763,6 +906,9 @@ function StrategyTab({
                   <span className="text-emerald-300">{buyVotes}/{totalVotes} BUY</span>
                   <span className="text-pink-300">{sellVotes}/{totalVotes} SELL</span>
                 </div>
+                <p className="mt-1 text-right text-[9px] font-mono text-slate-500">
+                  Opportunity score {market.indicators.opportunityScore?.toFixed(2) ?? '—'}
+                </p>
                 <div className="mt-2 flex h-1.5 overflow-hidden rounded-full bg-slate-800">
                   <span className="bg-emerald-400/80" style={{ width: `${(buyVotes / totalVotes) * 100}%` }} />
                   <span className="bg-pink-400/80" style={{ width: `${(sellVotes / totalVotes) * 100}%` }} />
@@ -839,20 +985,27 @@ function StrategyTab({
 
               <div className="rounded-2xl border border-purple-400/12 bg-purple-950/15 p-4">
                 <div className="mb-3 flex items-center justify-between">
-                  <h3 className="text-xs font-semibold text-white">Binance L2 · top 20</h3>
-                  <span className="text-[9px] text-slate-500">Snapshot {new Date(selectedMarket.orderBook.updatedAt).toLocaleTimeString()}</span>
+                  <h3 className="text-xs font-semibold text-white">Optional Binance L2 context</h3>
+                  <span className="text-[9px] text-slate-500">
+                    {selectedMarket.orderBook.updatedAt
+                      ? `Snapshot ${new Date(selectedMarket.orderBook.updatedAt).toLocaleTimeString()}`
+                      : 'Not available'}
+                  </span>
                 </div>
+                {selectedMarket.orderBook.levelCount === 0 && (
+                  <p className="mb-2 text-[9px] text-slate-500">Depth data is unavailable and does not gate strategy signals.</p>
+                )}
                 <div className="flex justify-between text-[10px] font-mono">
-                  <span className="text-emerald-300">{selectedMarket.indicators.orderBookPressure.bidPercent.toFixed(1)}% bids</span>
-                  <span className="text-pink-300">{selectedMarket.indicators.orderBookPressure.askPercent.toFixed(1)}% asks</span>
+                  <span className="text-emerald-300">{bidPercent.toFixed(1)}% bids</span>
+                  <span className="text-pink-300">{askPercent.toFixed(1)}% asks</span>
                 </div>
                 <div className="mt-2 flex h-2 overflow-hidden rounded-full bg-slate-800">
-                  <div className="bg-emerald-400 transition-all" style={{ width: `${selectedMarket.indicators.orderBookPressure.bidPercent}%` }} />
-                  <div className="bg-pink-400 transition-all" style={{ width: `${selectedMarket.indicators.orderBookPressure.askPercent}%` }} />
+                  <div className="bg-emerald-400 transition-all" style={{ width: `${bidPercent}%` }} />
+                  <div className="bg-pink-400 transition-all" style={{ width: `${askPercent}%` }} />
                 </div>
                 <div className="mt-3 grid grid-cols-2 gap-3 text-[10px] font-mono">
-                  <span className="text-slate-400">Best bid <b className="text-emerald-200">{formatPrice(selectedMarket.orderBook.bestBid, selectedCoin.decimals)}</b></span>
-                  <span className="text-right text-slate-400">Best ask <b className="text-pink-200">{formatPrice(selectedMarket.orderBook.bestAsk, selectedCoin.decimals)}</b></span>
+                  <span className="text-slate-400">Best bid <b className="text-emerald-200">{selectedMarket.orderBook.bestBid === null ? '—' : formatPrice(selectedMarket.orderBook.bestBid, selectedCoin.decimals)}</b></span>
+                  <span className="text-right text-slate-400">Best ask <b className="text-pink-200">{selectedMarket.orderBook.bestAsk === null ? '—' : formatPrice(selectedMarket.orderBook.bestAsk, selectedCoin.decimals)}</b></span>
                 </div>
               </div>
 
@@ -936,7 +1089,7 @@ function HealthTab({
       </section>
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <HealthCard icon={<Radio />} label="Binance WebSocket" value={snapshot?.status.feedConnected ? 'Connected' : 'Disconnected'} ok={Boolean(snapshot?.status.feedConnected)} />
-        <HealthCard icon={<CheckCircle2 />} label="Market readiness" value={snapshot?.status.marketDataReady ? '6 markets verified' : 'Data gate closed'} ok={feedOk} />
+        <HealthCard icon={<CheckCircle2 />} label="Market readiness" value={snapshot?.status.marketDataReady ? `${snapshot.status.symbols.length} markets verified` : 'Data gate closed'} ok={feedOk} />
         <HealthCard icon={<RefreshCw />} label="API refresh latency" value={latencyMs === null ? 'Unavailable' : `${latencyMs} ms`} ok={latencyMs !== null && latencyMs < 1500} />
         <HealthCard icon={<Clock />} label="Oldest live quote" value={tickAgeMs === null ? 'Unavailable' : `${(tickAgeMs / 1000).toFixed(1)} sec`} ok={tickAgeMs !== null && tickAgeMs <= 15_000} />
         <HealthCard icon={<Shield />} label="Strict risk shield" value={snapshot ? `${snapshot.status.riskPercent}% per trade` : 'Unavailable'} ok={riskOk} />
@@ -970,7 +1123,7 @@ function HealthTab({
       <section className="rounded-3xl border border-purple-400/15 bg-white/[0.025] p-5">
         <div className="mb-3 flex items-center justify-between">
           <h3 className="text-sm font-semibold text-white">Per-market feed health</h3>
-          <span className="text-[9px] font-mono text-slate-500">Fresh tick · 500 closed candles · L2 top 20</span>
+          <span className="text-[9px] font-mono text-slate-500">Fresh tick · 500 closed candles · optional L2 context</span>
         </div>
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
           {(snapshot?.markets ?? []).map((market) => (
@@ -1016,12 +1169,26 @@ function WalletTab({
   loading,
   closedTrades,
   startingBalance,
+  localAccount,
+  localAccountError,
+  localPrices,
+  terminalQuote,
+  onLocalBook,
+  onLocalClose,
+  onLocalEquityAdjust,
   onOpenSettings,
 }: {
   snapshot: BackendSnapshot | null;
   loading: boolean;
   closedTrades: BackendTrade[];
   startingBalance: number | null;
+  localAccount: LocalPaperAccount | null;
+  localAccountError: string;
+  localPrices: Record<string, { value: number; at: number }>;
+  terminalQuote: TerminalQuote | null;
+  onLocalBook: (symbol: string, side: 'LONG' | 'SHORT', price: number, atr: number) => Promise<void>;
+  onLocalClose: (tradeId: string, price: number) => Promise<void>;
+  onLocalEquityAdjust: (balance: number) => Promise<void>;
   onOpenSettings: () => void;
 }) {
   const heading = (
@@ -1042,7 +1209,23 @@ function WalletTab({
   );
   if (loading) return <div className="space-y-4">{heading}<SkeletonCard /><SkeletonCard /><SkeletonCard /></div>;
   if (!snapshot || startingBalance === null) {
-    return <div className="space-y-4">{heading}<p className="rounded-2xl border border-pink-400/20 bg-pink-950/20 p-5 text-sm text-pink-100">Wallet data unavailable.</p></div>;
+    return (
+      <div className="space-y-4">
+        {heading}
+        {localAccount
+          ? <LocalPaperWallet
+              account={localAccount}
+              prices={localPrices}
+              quote={terminalQuote}
+              quoteUpdatedAt={terminalQuote?.updatedAt ?? null}
+              error={localAccountError}
+              onBook={onLocalBook}
+              onClose={onLocalClose}
+              onAdjustEquity={onLocalEquityAdjust}
+            />
+          : <p role={localAccountError ? 'alert' : 'status'} className="rounded-2xl border border-pink-400/20 bg-pink-950/20 p-5 text-sm text-pink-100">{localAccountError || 'Opening the local IndexedDB paper account…'}</p>}
+      </div>
+    );
   }
   const equity = [startingBalance];
   const recentPnl = closedTrades.reduce((total, trade) => total + trade.pnlUsd, 0);

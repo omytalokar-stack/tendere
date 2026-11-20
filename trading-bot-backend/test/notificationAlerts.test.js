@@ -136,10 +136,18 @@ test('missing or invalid trade prices use the Market Quote fallback', async () =
 test('daily loss circuit-breaker notification is sent at most once per UTC day per process', async () => {
   await withMockedFetch(async (requests) => {
     const engine = new PaperTradingEngine({ logger: { info() {}, warn() {}, error() {} } });
-    engine.sendDailyLossAlertOnce();
-    engine.sendDailyLossAlertOnce();
+    const state = {
+      _id: new Date().toISOString().slice(0, 10),
+      dayStartEquity: 10_000,
+      dailyNetRealizedPnl: -500,
+      consecutiveLosses: 0,
+      paused: true,
+      pauseReason: 'DAILY_EQUITY_LOSS',
+    };
+    engine.recordDailyCircuitBreaker('DAILY_EQUITY_LOSS', state, 500);
+    engine.recordDailyCircuitBreaker('DAILY_EQUITY_LOSS', state, 500);
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(requests.length, 1);
-    assert.match(requests[0].options.body, new RegExp(`${config.dailyLossLimit} USDT`));
+    assert.match(requests[0].options.body, /500 USDT/);
   });
 });

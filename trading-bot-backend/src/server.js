@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const createApp = require('./app');
 const { config } = require('./config');
 const BotState = require('./models/BotState');
+const DailyRiskState = require('./models/DailyRiskState');
 const PaperTrade = require('./models/PaperTrade');
 const VirtualWallet = require('./models/VirtualWallet');
 const PaperTradingEngine = require('./services/paperTradingEngine');
@@ -12,7 +13,7 @@ async function main() {
     serverSelectionTimeoutMS: 10_000,
     maxPoolSize: 10,
   });
-  await Promise.all([BotState.init(), PaperTrade.init(), VirtualWallet.init()]);
+  await Promise.all([BotState.init(), DailyRiskState.init(), PaperTrade.init(), VirtualWallet.init()]);
   try {
     await PaperTrade.collection.dropIndex('one_open_paper_trade_per_account');
   } catch (error) {

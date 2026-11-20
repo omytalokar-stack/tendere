@@ -18,6 +18,14 @@ export interface BackendStatus {
   rewardRiskRatio: number;
   leverage: number;
   dailyLossLimit: number;
+  dailyCircuitBreaker?: {
+    dayStartEquity: number;
+    dailyNetRealizedPnl: number;
+    consecutiveLosses: number;
+    paused: boolean;
+    pauseReason: string | null;
+    pausedUntil: string;
+  };
 }
 
 export interface BackendMarket {
@@ -26,34 +34,47 @@ export interface BackendMarket {
   priceSource: 'TRADE' | 'ORDER_BOOK_MID';
   lastTradeAt: string;
   marketAgeMs: number;
+  tickCount: number;
+  nextCandleCloseAt: string | null;
   candleCount: number;
   orderBook: {
     bids: Array<{ price: number; quantity: number }>;
     asks: Array<{ price: number; quantity: number }>;
-    bestBid: number;
-    bestAsk: number;
+    bestBid: number | null;
+    bestAsk: number | null;
     bidQuantity: number;
     askQuantity: number;
     bidNotional: number;
     askNotional: number;
     levelCount: number;
-    updatedAt: string;
+    updatedAt: string | null;
   };
   indicators: {
     side: 'LONG' | 'SHORT' | null;
     buyVotes: number;
     sellVotes: number;
     totalVotes: number;
+    bullishCount: number;
+    bearishCount: number;
     atr: number;
     rsi: number;
     adx: number;
     vwap: number;
-    supertrend: { value: number; direction: 'BUY' | 'SELL' };
+    supertrend: { value: number; direction: 'BULLISH' | 'BEARISH' | 'NEUTRAL' };
     currentVolume: number;
     averageVolume: number;
     volumeRatio: number;
-    orderBookPressure: { bidQuantity: number; askQuantity: number; bidPercent: number; askPercent: number };
-    indicators: Array<{ name: string; value: unknown; vote: 'BUY' | 'SELL' | 'NEUTRAL' }>;
+    volumeSpikeRatio: number;
+    opportunityScore: number;
+    opportunityRank: number | null;
+    isTopOpportunity: boolean;
+    indicators: Array<{
+      name: string;
+      value: unknown;
+      vote: 'BUY' | 'SELL' | 'NEUTRAL';
+      direction?: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+      weight?: 1;
+    }>;
   };
 }
 
@@ -180,11 +201,16 @@ export async function getBackendSnapshot(signal?: AbortSignal): Promise<BackendS
       && Number.isFinite(market.price)
       && ['TRADE', 'ORDER_BOOK_MID'].includes(market.priceSource)
       && market.candleCount === 500
-      && market.orderBook?.levelCount === 20
-      && Array.isArray(market.orderBook.bids)
-      && market.orderBook.bids.length === 20
-      && Array.isArray(market.orderBook.asks)
-      && market.orderBook.asks.length === 20)) {
+      && market.tickCount >= 0
+      && (market.nextCandleCloseAt === null || Number.isFinite(Date.parse(market.nextCandleCloseAt)))
+      && market.indicators?.totalVotes === 10
+      && Array.isArray(market.indicators?.indicators)
+      && market.indicators.indicators.length === 10
+      && Number.isFinite(market.indicators?.opportunityScore)
+      && Number.isFinite(market.indicators?.volumeSpikeRatio)
+      && typeof market.indicators?.isTopOpportunity === 'boolean'
+      && Array.isArray(market.orderBook?.bids)
+      && Array.isArray(market.orderBook?.asks))) {
     throw new Error('DATA_FEED_OFFLINE: backend returned incomplete or invalid Binance market data');
   }
   return {

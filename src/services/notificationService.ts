@@ -1,6 +1,84 @@
 import type { BackendTrade } from './backendApi';
+import confetti from 'canvas-confetti';
 
 const ALERTS_ENABLED_KEY = 'alerts_enabled';
+const AUDIO_MUTED_KEY = 'audio_muted';
+let audioContext: AudioContext | null = null;
+
+export type CelebrationKind = 'opportunity' | 'profit';
+
+export function isAudioMuted(): boolean {
+  if (typeof window === 'undefined') return true;
+  try {
+    const stored = window.localStorage.getItem(AUDIO_MUTED_KEY);
+    return stored === null || stored === 'true';
+  } catch {
+    return true;
+  }
+}
+
+export function setAudioMuted(muted: boolean): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    window.localStorage.setItem(AUDIO_MUTED_KEY, String(muted));
+    if (!muted) {
+      audioContext ??= new AudioContext();
+      void audioContext.resume().catch((error: unknown) => {
+        console.warn('Unable to resume AuraAlgo audio feedback', error);
+      });
+    } else if (audioContext?.state === 'running') {
+      void audioContext.suspend().catch((error: unknown) => {
+        console.warn('Unable to suspend AuraAlgo audio feedback', error);
+      });
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function playChime(context: AudioContext, kind: CelebrationKind): void {
+  const isProfit = kind === 'profit';
+  const frequencies = isProfit ? [660, 880, 1108] : [523, 784];
+  frequencies.forEach((frequency, index) => {
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    const start = context.currentTime + index * 0.12;
+    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(frequency, start);
+    gain.gain.setValueAtTime(0.0001, start);
+    gain.gain.exponentialRampToValueAtTime(0.1, start + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.22);
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start(start);
+    oscillator.stop(start + 0.24);
+  });
+}
+
+export function celebrate(kind: CelebrationKind): void {
+  if (typeof window === 'undefined') return;
+  const isProfit = kind === 'profit';
+  confetti({
+    particleCount: isProfit ? 90 : 42,
+    spread: isProfit ? 70 : 48,
+    origin: { y: 0.72 },
+    colors: isProfit ? ['#34d399', '#f472b6', '#a78bfa'] : ['#f472b6', '#a78bfa', '#fbbf24'],
+    disableForReducedMotion: true,
+  });
+  if (isAudioMuted()) return;
+
+  try {
+    audioContext ??= new AudioContext();
+    const context = audioContext;
+    if (context.state === 'running') playChime(context, kind);
+    else void context.resume()
+      .then(() => playChime(context, kind))
+      .catch((error: unknown) => console.warn('AuraAlgo audio feedback is unavailable', error));
+  } catch (error) {
+    console.warn('AuraAlgo audio feedback is unavailable', error);
+  }
+}
 
 export function areBrowserAlertsEnabled(): boolean {
   if (typeof window === 'undefined' || !('Notification' in window)) return false;
