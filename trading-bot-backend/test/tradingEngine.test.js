@@ -26,6 +26,48 @@ test('virtual wallet defaults to the configured paper balance', () => {
   assert.equal(wallet.lossCount, 0);
 });
 
+test('startup wallet reconciliation restores margin reserved by partially open trades', async () => {
+  const originals = {
+    findWallet: VirtualWallet.findById,
+    updateWallet: VirtualWallet.findOneAndUpdate,
+    findTrades: PaperTrade.find,
+  };
+  const wallet = {
+    balance: 10_000,
+    availableMargin: 9_900,
+    inTradeMargin: 100,
+  };
+  let update;
+  VirtualWallet.findById = () => ({ lean: async () => wallet });
+  VirtualWallet.findOneAndUpdate = async (_filter, walletUpdate) => {
+    update = walletUpdate;
+    return { ...wallet, ...walletUpdate.$set };
+  };
+  PaperTrade.find = () => ({
+    select: () => ({
+      lean: async () => [{
+        _id: 'partially-open-trade',
+        margin: 500,
+        initialQuantity: 2,
+        remainingQuantity: 1,
+        quantity: 2,
+      }],
+    }),
+  });
+  try {
+    const engine = new PaperTradingEngine({ logger: { info() {}, warn() {}, error() {} } });
+    await engine.reconcileWalletWithOpenTrades();
+    assert.deepEqual(update.$set, {
+      availableMargin: 9_750,
+      inTradeMargin: 250,
+    });
+  } finally {
+    VirtualWallet.findById = originals.findWallet;
+    VirtualWallet.findOneAndUpdate = originals.updateWallet;
+    PaperTrade.find = originals.findTrades;
+  }
+});
+
 test('a fresh bot state defaults to enabled unless configuration explicitly disables it', () => {
   const state = new BotState();
   assert.equal(state.enabled, config.botEnabled);
@@ -980,7 +1022,7 @@ test('daily circuit breaker stops the scanner from opening new trades', async ()
   }
 });
 
-test('market APIs fail with an explicit 503 while real feed data is unavailable', async () => {
+test('market status stays readable while feed data is unavailable, but verified-data APIs remain gated', async () => {
   const engine = new PaperTradingEngine({ logger: { info() {}, warn() {}, error() {} } });
   const originalConsoleError = console.error;
   let errorLogCount = 0;
@@ -989,16 +1031,23 @@ test('market APIs fail with an explicit 503 while real feed data is unavailable'
   await new Promise((resolve) => server.once('listening', resolve));
   const { port } = server.address();
   try {
-    const [statusResponse, candleResponse, auditResponse] = await Promise.all([
+    const [statusResponse, candleResponse, pricesResponse, auditResponse] = await Promise.all([
       fetch(`http://127.0.0.1:${port}/api/market/status`),
       fetch(`http://127.0.0.1:${port}/api/market/ETHUSDT/candles`),
+      fetch(`http://127.0.0.1:${port}/api/market/prices`),
       fetch(`http://127.0.0.1:${port}/api/bot/audit`),
     ]);
-    assert.equal(statusResponse.status, 503);
-    assert.match((await statusResponse.json()).error, /^DATA_FEED_OFFLINE:/);
+    assert.equal(statusResponse.status, 200);
+    const status = await statusResponse.json();
+    assert.equal(status.markets.length, SYMBOLS.length);
+    assert.equal(status.markets[0].ready, false);
+    assert.equal(status.markets[0].candleCount, 0);
+    assert.match(status.markets[0].candleError, /^DATA_FEED_OFFLINE:/);
+    assert.equal(status.markets[0].indicators.totalVotes, 0);
     assert.equal(errorLogCount, 0, 'expected unavailable market data should not log a server stack on every poll');
     assert.equal(candleResponse.status, 503);
     assert.match((await candleResponse.json()).error, /^DATA_FEED_OFFLINE:/);
+    assert.equal(pricesResponse.status, 503);
     assert.equal(auditResponse.status, 200);
     assert.deepEqual((await auditResponse.json()).events, []);
     engine.getAuditLog = () => [{ message: 'x'.repeat(2048) }];

@@ -89,8 +89,10 @@ const TABS: Array<{ id: Tab; label: string; icon: typeof Activity }> = [
   { id: 'wallet', label: 'Wallet', icon: Wallet },
 ];
 
-function formatPrice(value: number, decimals: number) {
-  return value.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+function formatPrice(value: number | null, decimals: number) {
+  return value === null
+    ? '—'
+    : value.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
 
 function formatUsd(value: number) {
@@ -337,7 +339,6 @@ export default function App() {
           setBackendError('');
           setLatencyMs(Math.round(performance.now() - started));
         } else if (!(snapshotResult.reason instanceof DOMException && snapshotResult.reason.name === 'AbortError')) {
-          setSnapshot(null);
           setBackendError(snapshotResult.reason instanceof Error ? snapshotResult.reason.message : 'Backend request failed');
         }
         if (auditResult.status === 'fulfilled') {
@@ -494,9 +495,10 @@ export default function App() {
   const startingBalance = snapshot
     ? snapshot.wallet.balance - snapshot.wallet.totalRealizedPnl
     : null;
-  const tickAgeMs = snapshot?.markets.length
-    ? Math.max(...snapshot.markets.map((market) => market.marketAgeMs))
-    : null;
+  const marketAges = snapshot?.markets
+    .map((market) => market.marketAgeMs)
+    .filter((age): age is number => age !== null) ?? [];
+  const tickAgeMs = marketAges.length ? Math.max(...marketAges) : null;
 
   async function runControlAction(actionId: string, operation: () => Promise<void>) {
     setActionPending(actionId);
@@ -612,6 +614,11 @@ export default function App() {
               <p className="font-semibold">Live data unavailable</p>
               <p className="mt-1 break-words text-xs text-pink-100/80">{backendError}</p>
             </div>
+          </div>
+        )}
+        {snapshot && !snapshot.status.marketDataReady && (
+          <div role="status" className="mb-5 rounded-2xl border border-amber-300/20 bg-amber-500/[0.05] p-4 text-xs text-amber-100/80">
+            Backend Binance feed is reconnecting or still synchronizing. Paper entries remain blocked until market data is verified.
           </div>
         )}
         {actionError && (
@@ -821,8 +828,8 @@ function HomeTab({
         const coin = COINS.find((item) => item.symbol === trade.symbol);
         const market = markets.find((item) => item.symbol === trade.symbol);
         if (!coin || !market) return null;
-        const pnl = pnlFor(trade, market.price);
-        const progress = trade.side === 'LONG'
+        const pnl = market.price === null ? null : pnlFor(trade, market.price);
+        const progress = market.price === null ? null : trade.side === 'LONG'
           ? ((market.price - trade.stopLoss) / (trade.takeProfit - trade.stopLoss)) * 100
           : ((trade.stopLoss - market.price) / (trade.stopLoss - trade.takeProfit)) * 100;
         return (
@@ -858,12 +865,14 @@ function HomeTab({
               </div>
             </div>
 
-            <div className={`mt-4 rounded-2xl border p-4 ${pnl.pnlUsd >= 0 ? 'border-emerald-400/20 bg-emerald-950/20' : 'border-pink-400/20 bg-pink-950/20'}`}>
+            <div className={`mt-4 rounded-2xl border p-4 ${pnl === null ? 'border-purple-400/10 bg-black/15' : pnl.pnlUsd >= 0 ? 'border-emerald-400/20 bg-emerald-950/20' : 'border-pink-400/20 bg-pink-950/20'}`}>
               <p className="text-[10px] uppercase tracking-[.18em] text-slate-400">Estimated net P&amp;L · live mark</p>
-              <div className={`mt-1 flex flex-wrap items-baseline gap-x-3 font-mono ${pnl.pnlUsd >= 0 ? 'text-emerald-300' : 'text-pink-300'}`}>
-                <span className="text-2xl font-bold">{pnl.pnlUsd >= 0 ? '+' : ''}{formatUsd(pnl.pnlUsd)}</span>
-                <span className="text-sm">{pnl.pnlPercent >= 0 ? '+' : ''}{pnl.pnlPercent.toFixed(2)}%</span>
-              </div>
+              {pnl
+                ? <div className={`mt-1 flex flex-wrap items-baseline gap-x-3 font-mono ${pnl.pnlUsd >= 0 ? 'text-emerald-300' : 'text-pink-300'}`}>
+                  <span className="text-2xl font-bold">{pnl.pnlUsd >= 0 ? '+' : ''}{formatUsd(pnl.pnlUsd)}</span>
+                  <span className="text-sm">{pnl.pnlPercent >= 0 ? '+' : ''}{pnl.pnlPercent.toFixed(2)}%</span>
+                </div>
+                : <p className="mt-2 text-sm text-amber-200">Live quote unavailable</p>}
               <p className="mt-2 text-[10px] text-slate-500">Clean simulated fill estimate · Wallet realized: {realizedPnl === null ? '—' : formatUsd(realizedPnl)}</p>
             </div>
 
@@ -878,7 +887,7 @@ function HomeTab({
                 <span className="text-emerald-200">TP2 ${formatPrice(trade.tp2Price ?? trade.takeProfit, coin.decimals)}</span>
               </div>
               <div className="relative mt-3 h-2 overflow-hidden rounded-full bg-slate-800">
-                <div className="absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-pink-500 via-purple-400 to-emerald-400 transition-all duration-700" style={{ width: `${Math.min(100, Math.max(0, progress))}%` }} />
+                <div className="absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-pink-500 via-purple-400 to-emerald-400 transition-all duration-700" style={{ width: `${Math.min(100, Math.max(0, progress ?? 0))}%` }} />
               </div>
               <p className="mt-2 text-right text-[10px] text-slate-500">Position relative to backend stop and targets</p>
             </div>
@@ -967,6 +976,7 @@ function StrategyTab({
                 </div>
                 <p className="mt-3 font-mono text-lg text-white">${formatPrice(market.price, coin.decimals)}</p>
                 {market.priceSource === 'ORDER_BOOK_MID' && <p className="mt-1 text-[9px] text-slate-500">Live L2 midpoint</p>}
+                {!market.ready && <p className="mt-1 text-[9px] text-amber-200">{market.candleError ?? 'Live quote unavailable'}</p>}
                 <div className="mt-2 flex flex-wrap gap-1">
                   <HtfTrendPill timeframe="1H" trend={market.indicators.htf1hTrend} />
                   <HtfTrendPill timeframe="4H" trend={market.indicators.htf4hTrend} />
@@ -976,10 +986,10 @@ function StrategyTab({
                     showStandard={Boolean(side)}
                   />
                 </div>
-                <div className="mt-3 flex items-center justify-between text-[10px] font-mono">
+                {market.ready && <div className="mt-3 flex items-center justify-between text-[10px] font-mono">
                   <span className="text-emerald-300">{buyVotes}/{totalVotes} BUY</span>
                   <span className="text-pink-300">{sellVotes}/{totalVotes} SELL</span>
-                </div>
+                </div>}
                 <p className="mt-1 text-right text-[9px] font-mono text-slate-500">
                   Opportunity score {market.indicators.opportunityScore?.toFixed(2) ?? '—'}
                 </p>
@@ -1105,6 +1115,11 @@ function SwingRiskPanel({ candles, market, decimals, loading, error }: {
       Swing-risk view requires all 500 verified closed candles.
     </div>
   );
+  if (market.price === null) return (
+    <div className="rounded-2xl border border-purple-400/10 bg-black/15 p-4 text-xs text-slate-500">
+      Live quote unavailable; swing-risk estimates are paused.
+    </div>
+  );
   const recent = candles.slice(-50);
   const high = Math.max(...recent.map((candle) => candle.high));
   const low = Math.min(...recent.map((candle) => candle.low));
@@ -1203,7 +1218,11 @@ function HealthTab({
           {(snapshot?.markets ?? []).map((market) => (
             <div key={market.symbol} className="flex items-center justify-between rounded-xl border border-purple-400/10 bg-black/15 px-3 py-2.5">
               <span className="text-xs font-mono text-slate-300">{market.symbol}</span>
-              <span className="text-[9px] text-emerald-200">{(market.marketAgeMs / 1000).toFixed(1)}s · {market.candleCount} · {market.orderBook.levelCount} levels</span>
+              <span className={`text-[9px] ${market.ready ? 'text-emerald-200' : 'text-amber-200'}`}>
+                {market.ready
+                  ? `${((market.marketAgeMs ?? 0) / 1000).toFixed(1)}s · ${market.candleCount} · ${market.orderBook.levelCount} levels`
+                  : market.candleError ?? 'Feed offline'}
+              </span>
             </div>
           ))}
           {snapshot?.markets.length === 0 && <p className="text-xs text-slate-500">Live market details unavailable.</p>}

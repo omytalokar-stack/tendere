@@ -183,7 +183,7 @@ function createApp(engine, { assistantGenerator = generateAssistantResponse } = 
       return res.json({
         interval: config.candleInterval,
         entryIntervals: config.entryIntervals,
-        markets: engine.getAllMarketSnapshots(),
+        markets: engine.getAllMarketSnapshots({ allowUnavailable: true }),
       });
     } catch (error) {
       return next(error);

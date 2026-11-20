@@ -32,10 +32,12 @@ export interface BackendStatus {
 
 export interface BackendMarket {
   symbol: string;
-  price: number;
-  priceSource: 'TRADE' | 'ORDER_BOOK_MID';
-  lastTradeAt: string;
-  marketAgeMs: number;
+  price: number | null;
+  priceSource: 'TRADE' | 'ORDER_BOOK_MID' | null;
+  ready: boolean;
+  candleError: string | null;
+  lastTradeAt: string | null;
+  marketAgeMs: number | null;
   tickCount: number;
   nextCandleCloseAt: string | null;
   candleCount: number;
@@ -225,14 +227,26 @@ export async function getBackendSnapshot(signal?: AbortSignal): Promise<BackendS
     || marketResponse.markets.length !== status.symbols.length
     || !marketResponse.markets.every((market) =>
       status.symbols.includes(market.symbol)
-      && Number.isFinite(market.price)
-      && ['TRADE', 'ORDER_BOOK_MID'].includes(market.priceSource)
-      && market.candleCount === 500
+      && typeof market.ready === 'boolean'
+      && (market.candleError === null || typeof market.candleError === 'string')
+      && (market.price === null || Number.isFinite(market.price))
+      && (market.priceSource === null || ['TRADE', 'ORDER_BOOK_MID'].includes(market.priceSource))
+      && (market.marketAgeMs === null || Number.isFinite(market.marketAgeMs))
+      && Number.isInteger(market.candleCount)
+      && market.candleCount >= 0
+      && market.candleCount <= 500
       && market.tickCount >= 0
       && (market.nextCandleCloseAt === null || Number.isFinite(Date.parse(market.nextCandleCloseAt)))
-      && market.indicators?.totalVotes === 10
       && Array.isArray(market.indicators?.indicators)
-      && market.indicators.indicators.length === 10
+      && (market.ready
+        ? market.price !== null
+          && market.priceSource !== null
+          && market.candleCount === 500
+          && market.marketAgeMs !== null
+          && market.indicators?.totalVotes === 10
+          && market.indicators.indicators.length === 10
+        : market.indicators?.totalVotes === 0 || market.indicators?.totalVotes === 10)
+      && (market.indicators.indicators.length === 10 || market.indicators.indicators.length === 0)
       && Number.isFinite(market.indicators?.opportunityScore)
       && Number.isFinite(market.indicators?.volumeSpikeRatio)
       && typeof market.indicators?.isTopOpportunity === 'boolean'

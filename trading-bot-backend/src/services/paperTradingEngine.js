@@ -47,6 +47,35 @@ function round(value, places = 8) {
   return Number(value.toFixed(places));
 }
 
+function unavailableAnalysis() {
+  return {
+    htf1hTrend: 'NEUTRAL',
+    htf4hTrend: 'NEUTRAL',
+    htfAlignment: 'STANDARD',
+    allocationPercent: 25,
+    counterTrendBlocked: false,
+    htf1h: { trend: 'NEUTRAL', close: null, ema20: null, ema50: null, ema200: null, candleCount: 0 },
+    htf4h: { trend: 'NEUTRAL', close: null, ema20: null, ema50: null, ema200: null, candleCount: 0 },
+    side: null,
+    buyVotes: 0,
+    sellVotes: 0,
+    totalVotes: 0,
+    bullishCount: 0,
+    bearishCount: 0,
+    atr: 0,
+    rsi: 0,
+    adx: 0,
+    vwap: 0,
+    supertrend: { value: 0, direction: 'NEUTRAL' },
+    currentVolume: 0,
+    averageVolume: 0,
+    volumeRatio: 0,
+    volumeSpikeRatio: 0,
+    opportunityScore: 0,
+    indicators: [],
+  };
+}
+
 class PaperTradingEngine {
   constructor({ logger = console } = {}) {
     this.logger = logger;
@@ -144,6 +173,51 @@ class PaperTradingEngine {
     );
   }
 
+  async reconcileWalletWithOpenTrades() {
+    const wallet = await VirtualWallet.findById('primary').lean();
+    if (!wallet) throw new Error('Virtual wallet has not been initialized');
+    const openTrades = await PaperTrade.find({ status: 'OPEN' })
+      .select('margin initialQuantity remainingQuantity quantity')
+      .lean();
+    const inTradeMargin = round(openTrades.reduce((total, trade) => {
+      const initialQuantity = Number(trade.initialQuantity || trade.quantity);
+      const remainingQuantity = Number(trade.remainingQuantity ?? trade.quantity);
+      const margin = Number(trade.margin);
+      if (![initialQuantity, remainingQuantity, margin].every(Number.isFinite)
+        || initialQuantity <= 0
+        || remainingQuantity < 0
+        || remainingQuantity > initialQuantity
+        || margin < 0) {
+        throw new Error(`Cannot reconcile wallet: invalid open-trade margin data for ${trade._id}`);
+      }
+      return total + margin * remainingQuantity / initialQuantity;
+    }, 0));
+    const balance = Number(wallet.balance);
+    if (!Number.isFinite(balance) || balance < 0) {
+      throw new Error('Cannot reconcile wallet: invalid paper balance');
+    }
+    const availableMargin = round(Math.max(0, balance - inTradeMargin));
+    if (Math.abs(Number(wallet.inTradeMargin) - inTradeMargin) < 1e-8
+      && Math.abs(Number(wallet.availableMargin) - availableMargin) < 1e-8) {
+      return wallet;
+    }
+
+    const updatedWallet = await VirtualWallet.findOneAndUpdate(
+      { _id: 'primary' },
+      { $set: { availableMargin, inTradeMargin } },
+      { returnDocument: 'after' },
+    );
+    if (!updatedWallet) throw new Error('Cannot reconcile wallet: primary wallet disappeared');
+    this.logger.warn('Reconciled paper wallet margin with open positions', {
+      previousAvailableMargin: wallet.availableMargin,
+      previousInTradeMargin: wallet.inTradeMargin,
+      availableMargin,
+      inTradeMargin,
+      openTradeCount: openTrades.length,
+    });
+    return updatedWallet;
+  }
+
   async initializeDailyRiskState(now = new Date()) {
     const key = now.toISOString().slice(0, 10);
     const existing = await DailyRiskState.findById(key).lean();
@@ -203,6 +277,7 @@ class PaperTradingEngine {
     this.running = true;
     try {
       await this.initializeWallet();
+      await this.reconcileWalletWithOpenTrades();
       await this.initializeDailyRiskState();
       await this.feed.start();
     } catch (error) {
@@ -1100,8 +1175,8 @@ class PaperTradingEngine {
       tickCount: this.tickCounts.get(symbol) || 0,
       nextCandleCloseAt: nextCandleCloseAt ? new Date(nextCandleCloseAt).toISOString() : null,
       candleError,
-      orderBookError,
       ready: !candleError && tradePriceFresh && this.feed.connected,
+      orderBookError,
     };
   }
 
@@ -1135,17 +1210,23 @@ class PaperTradingEngine {
     return analysis;
   }
 
-  getAllMarketSnapshots() {
+  getAllMarketSnapshots({ allowUnavailable = false } = {}) {
     const markets = SYMBOLS.map((symbol) => this.getMarketSnapshot(symbol));
     const unavailable = markets.find((market) => !market.ready);
-    if (unavailable) {
+    if (unavailable && !allowUnavailable) {
       const error = new Error(unavailable.candleError || `DATA_FEED_OFFLINE: Binance real feed failed for ${unavailable.symbol}: live trade quote is stale`);
       error.status = 503;
       throw error;
     }
-    const analyses = new Map(markets.map((market) => [market.symbol, this.getIndicators(market.symbol)]));
+    const analyses = new Map(markets.map((market) => [
+      market.symbol,
+      market.candleError || (allowUnavailable && !market.ready)
+        ? unavailableAnalysis()
+        : this.getIndicators(market.symbol),
+    ]));
     const topOpportunities = rankOpportunities(
       markets
+        .filter((market) => market.ready)
         .map((market) => ({ symbol: market.symbol, analysis: analyses.get(market.symbol) }))
         .filter((entry) => entry.analysis.side),
     );
@@ -1154,11 +1235,13 @@ class PaperTradingEngine {
       symbol: market.symbol,
       price: market.price,
       priceSource: market.priceSource,
+      ready: market.ready,
+      candleError: market.candleError,
       lastTradeAt: market.lastTradeAt,
       marketAgeMs: market.marketAgeMs,
       tickCount: market.tickCount,
       nextCandleCloseAt: market.nextCandleCloseAt,
-      candleCount: REQUIRED_CANDLES,
+      candleCount: market.candles.length,
       orderBook: market.orderBook ? {
         bids: market.orderBook.bids,
         asks: market.orderBook.asks,
