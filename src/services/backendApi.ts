@@ -26,6 +26,8 @@ export interface BackendStatus {
     pauseReason: string | null;
     pausedUntil: string;
   };
+  aPlusPositionMarginFraction?: number;
+  aPlusMaxPositionMargin?: number;
 }
 
 export interface BackendMarket {
@@ -50,6 +52,27 @@ export interface BackendMarket {
     updatedAt: string | null;
   };
   indicators: {
+    htf1hTrend?: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+    htf4hTrend?: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+    htfAlignment?: 'STANDARD' | 'ALIGNED_1H_4H';
+    allocationPercent?: 25 | 35;
+    counterTrendBlocked?: boolean;
+    htf1h?: {
+      trend: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+      close: number | null;
+      ema20: number | null;
+      ema50: number | null;
+      ema200: number | null;
+      candleCount: number;
+    };
+    htf4h?: {
+      trend: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+      close: number | null;
+      ema20: number | null;
+      ema50: number | null;
+      ema200: number | null;
+      candleCount: number;
+    };
     side: 'LONG' | 'SHORT' | null;
     buyVotes: number;
     sellVotes: number;
@@ -122,6 +145,10 @@ export interface BackendTrade {
   initialQuantity?: number | null;
   remainingQuantity?: number | null;
   margin: number;
+  htf1hTrend?: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  htf4hTrend?: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  htfAlignment?: 'STANDARD' | 'ALIGNED_1H_4H';
+  allocationPercent?: 25 | 35;
   leverage: number;
   stopLoss: number;
   takeProfit: number;
@@ -209,6 +236,14 @@ export async function getBackendSnapshot(signal?: AbortSignal): Promise<BackendS
       && Number.isFinite(market.indicators?.opportunityScore)
       && Number.isFinite(market.indicators?.volumeSpikeRatio)
       && typeof market.indicators?.isTopOpportunity === 'boolean'
+      && (market.indicators?.htf1hTrend === undefined
+        || ['BULLISH', 'BEARISH', 'NEUTRAL'].includes(market.indicators.htf1hTrend))
+      && (market.indicators?.htf4hTrend === undefined
+        || ['BULLISH', 'BEARISH', 'NEUTRAL'].includes(market.indicators.htf4hTrend))
+      && (market.indicators?.htfAlignment === undefined
+        || ['STANDARD', 'ALIGNED_1H_4H'].includes(market.indicators.htfAlignment))
+      && (market.indicators?.allocationPercent === undefined
+        || [25, 35].includes(market.indicators.allocationPercent))
       && Array.isArray(market.orderBook?.bids)
       && Array.isArray(market.orderBook?.asks))) {
     throw new Error('DATA_FEED_OFFLINE: backend returned incomplete or invalid Binance market data');

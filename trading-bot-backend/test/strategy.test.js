@@ -6,19 +6,23 @@ const {
   getConfirmedEntrySignal,
   rankOpportunities,
   sizePosition,
+  calculateHigherTimeframeTrends,
+  getHtfEntryContext,
   REQUIRED_CANDLES,
+  MAX_HTF_SOURCE_CANDLES,
   MIN_ENTRY_VOTES,
   TOP_OPPORTUNITIES,
 } = require('../src/services/strategy');
 
-function trendingCandles(direction = 1) {
+function trendingCandles(direction = 1, length = REQUIRED_CANDLES) {
   let close = 100;
   const upPattern = [1, -0.4, 0.8, -0.7, 1, -0.6, 0.6];
   const finalPattern = [-1, -1, -1, 1, 1, 1, 1];
-  return Array.from({ length: REQUIRED_CANDLES }, (_, index) => {
-    const change = direction * (index < 480
+  const finalPatternStart = length - 20;
+  return Array.from({ length }, (_, index) => {
+    const change = direction * (index < finalPatternStart
       ? upPattern[index % upPattern.length]
-      : finalPattern[(index - 480) % finalPattern.length]);
+      : finalPattern[(index - finalPatternStart) % finalPattern.length]);
     const open = close;
     close += change;
     return {
@@ -30,7 +34,7 @@ function trendingCandles(direction = 1) {
       high: Math.max(open, close) + 0.3,
       low: Math.min(open, close) - 0.3,
       close,
-      volume: index === REQUIRED_CANDLES - 1 ? 150 : 100,
+      volume: index === length - 1 ? 150 : 100,
       isFinal: true,
       isClosed: true,
     };
@@ -71,7 +75,7 @@ function qualifyingShort(overrides = {}) {
   };
 }
 
-test('analysis requires exactly 500 valid closed candles and returns 10 equally weighted indicators', () => {
+test('analysis requires at least 500 valid closed candles and returns 10 equally weighted indicators', () => {
   assert.throws(() => analyzeCandles([]), { code: 'INSUFFICIENT_HISTORICAL_DATA' });
   assert.throws(
     () => analyzeCandles(trendingCandles().slice(1)),
@@ -97,8 +101,30 @@ test('analysis requires exactly 500 valid closed candles and returns 10 equally 
     'ATR-14 + candle body',
   ]);
   assert.equal(analysis.side, 'LONG');
+  assert.equal(analysis.htf4hTrend, 'NEUTRAL');
+  assert.equal(analysis.htf4h.ema50, null);
+  assert.equal(analysis.htfAlignment, 'STANDARD');
+  assert.equal(analysis.allocationPercent, 25);
   assert.equal(analysis.volumeSpikeRatio, 1.5);
   assert.equal(analysis.opportunityScore, analysis.volumeSpikeRatio * analysis.adx);
+});
+
+test('higher-timeframe trends use only complete contiguous 15m groups and wait for EMA50 history', () => {
+  const candles = trendingCandles(1, MAX_HTF_SOURCE_CANDLES);
+  const trends = calculateHigherTimeframeTrends(candles);
+  assert.equal(trends.htf1h.candleCount, 207);
+  assert.equal(trends.htf4h.candleCount, 51);
+  assert.equal(trends.htf1h.trend, 'BULLISH');
+  assert.equal(trends.htf4h.trend, 'BULLISH');
+  assert.ok(Number.isFinite(trends.htf1h.ema200));
+  assert.equal(trends.htf4h.ema200, null);
+
+  const incomplete = calculateHigherTimeframeTrends(trendingCandles());
+  assert.equal(incomplete.htf4h.candleCount, 31);
+  assert.equal(incomplete.htf4h.ema50, null);
+  assert.equal(incomplete.htf4h.trend, 'NEUTRAL');
+  const withGap = candles.filter((_, index) => index !== 10);
+  assert.ok(calculateHigherTimeframeTrends(withGap).htf1h.candleCount < trends.htf1h.candleCount);
 });
 
 test('entry requires seven aligned votes, strict trend, ADX above 22, and a 1.2x volume spike', () => {
@@ -121,6 +147,36 @@ test('RSI extreme guard blocks long above 68 and short below 32', () => {
   assert.equal(getEntrySignal(qualifyingLong({ rsi: 68.01 })), null);
   assert.equal(getEntrySignal(qualifyingShort({ rsi: 32 })), 'SHORT');
   assert.equal(getEntrySignal(qualifyingShort({ rsi: 31.99 })), null);
+});
+
+test('higher-timeframe alignment boosts A+ sizing, preserves standard sizing, and blocks dual counter-trend entries', () => {
+  assert.deepEqual(getHtfEntryContext('LONG', 'BULLISH', 'BULLISH'), {
+    htfAlignment: 'ALIGNED_1H_4H',
+    allocationPercent: 35,
+    counterTrendBlocked: false,
+  });
+  assert.deepEqual(getHtfEntryContext('LONG', 'BULLISH', 'NEUTRAL'), {
+    htfAlignment: 'STANDARD',
+    allocationPercent: 25,
+    counterTrendBlocked: false,
+  });
+  assert.deepEqual(getHtfEntryContext('LONG', 'BEARISH', 'BEARISH'), {
+    htfAlignment: 'STANDARD',
+    allocationPercent: 25,
+    counterTrendBlocked: true,
+  });
+  assert.equal(getEntrySignal(qualifyingLong({
+    htf1hTrend: 'BULLISH',
+    htf4hTrend: 'BULLISH',
+  })), 'LONG');
+  assert.equal(getEntrySignal(qualifyingLong({
+    htf1hTrend: 'BEARISH',
+    htf4hTrend: 'BEARISH',
+  })), null);
+  assert.equal(getEntrySignal(qualifyingLong({
+    htf1hTrend: 'BULLISH',
+    htf4hTrend: 'NEUTRAL',
+  })), 'LONG');
 });
 
 test('five-minute entries require the fifteen-minute signal to confirm the same side', () => {
@@ -149,16 +205,39 @@ test('position sizing is limited to 25% of free margin and capped at 2500 USDT',
     margin: 2_500,
     quantity: 25,
     allocatedMargin: 2_500,
+    allocationPercent: 25,
   });
   assert.deepEqual(sizePosition({ availableMargin: 4_000, entryPrice: 100 }), {
     margin: 1_000,
     quantity: 10,
     allocatedMargin: 1_000,
+    allocationPercent: 25,
   });
   assert.deepEqual(sizePosition({ availableMargin: 20_000, entryPrice: 10 }), {
     margin: 2_500,
     quantity: 250,
     allocatedMargin: 2_500,
+    allocationPercent: 25,
+  });
+  assert.deepEqual(sizePosition({
+    availableMargin: 10_000,
+    entryPrice: 100,
+    allocationPercent: 35,
+  }), {
+    margin: 3_500,
+    quantity: 35,
+    allocatedMargin: 3_500,
+    allocationPercent: 35,
+  });
+  assert.deepEqual(sizePosition({
+    availableMargin: 20_000,
+    entryPrice: 100,
+    allocationPercent: 35,
+  }), {
+    margin: 3_500,
+    quantity: 35,
+    allocatedMargin: 3_500,
+    allocationPercent: 35,
   });
   assert.throws(() => sizePosition({ availableMargin: 0, entryPrice: 100 }), /Invalid inputs/);
 });

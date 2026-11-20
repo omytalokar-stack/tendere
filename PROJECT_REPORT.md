@@ -36,7 +36,8 @@ Webapp mobile-first dark dashboard hai. Neeche fixed navigation se chaar main sc
 
 - Ten backend cards BTC, ETH, SOL, BNB, XRP, DOGE, ADA, AVAX, SUI aur NEAR pairs ke verified price, ten BUY/SELL/NEUTRAL votes, top-two rank aur opportunity score dikhate hain. Core pairs ke collapsible screener mein ALL, OPPORTUNITIES, LONGS aur SHORTS filters hain.
 - Kisi card ko chunne par ten-indicator detail, volume ratio, optional L2 context aur recent swing-risk summary khulti hai. Order-book imbalance entry gate nahi hai.
-- Entry ke liye kam-se-kam 7 aligned votes, strict EMA-200/ribbon/ADX trend alignment, ADX `>22`, volume ratio `>=1.2`, RSI extreme guard aur circuit-breaker/risk limits pass hone chahiye.
+- Entry ke liye kam-se-kam 7 aligned votes, strict EMA-200/ribbon/ADX trend alignment, ADX `>22`, volume ratio `>=1.2`, RSI extreme guard aur circuit-breaker/risk limits pass hone chahiye. 15m candles ko memory mein 1H (4 candles) aur 4H (16 candles) bars mein resample karke HTF trend bhi check hota hai; dono HTF trends opposite hon to entry block hoti hai.
+- 1H/4H dono 15m signal se align hon to setup `A_PLUS` hota hai aur allocation 35% (max `$3,500`); mixed/neutral HTF par standard 25% (max `$2,500`) rehta hai. Existing 500-candle bootstrap ke baad WebSocket se 830 contiguous 15m candles jama hone tak 4H EMA50 neutral rehta hai; koi extra Binance REST request nahi hoti.
 - Upar ka market terminal BTC/ETH/SOL/BNB/XRP/DOGE/ADA/AVAX/SUI/NEAR quick pairs, PEPE, custom USDT search aur 5m/15m/1h/4h/1d timeframe deta hai. Binance public REST/WebSocket se 500 closed candles, live tick count, price change, connection state aur close countdown aate hain.
 - Interactive chart `lightweight-charts` candlestick + volume render karta hai; EMA 20/50/200, Supertrend (10,3) aur Bollinger Bands (20,2) overlays toggle ho sakte hain. Crosshair par OHLCV readout hai. Overlay calculations closed candles par hote hain, live candle WebSocket se update hoti hai.
 - 500-candle audit modal candle statistics, searchable/paginated OHLCV aur indicator values, aur CSV download deta hai. PEPE/custom symbols chart/watchlist aur manual local booking ke liye hain; auto-scanner ke liye nahi.
@@ -213,12 +214,13 @@ Qualifying candidates ko `volumeSpikeRatio * ADX` se rank karke sirf top two par
 Default position allocation:
 
 ```text
-allocated margin = min(available margin × 25%, $2,500 USDT)
+aligned 1H + 4H: allocated margin = min(available margin × 35%, $3,500 USDT)
+standard / mixed HTF: allocated margin = min(available margin × 25%, $2,500 USDT)
 quantity = allocated margin ÷ entry price
 stop distance = ATR-14 × 1.5
 ```
 
-Leverage defaults and MongoDB schema remain compatible with existing deployments. Entry tab skip hoti hai jab quantity invalid ho ya 25% margin allocation account ke current available margin se zyada ho.
+Leverage defaults and MongoDB schema remain compatible with existing deployments. Entry tab skip hoti hai jab quantity invalid ho ya selected allocation account ke current available margin se zyada ho.
 
 ### Entry/exit simulation
 
@@ -288,7 +290,8 @@ Backend defaults aur bounds [`trading-bot-backend/src/config.js`](./trading-bot-
 | `CANDLE_INTERVAL` | Default `15m` |
 | `PAPER_LEVERAGE` | Default `1`, allowed `1–5` |
 | `MAX_OPEN_TRADES` | Default and maximum `3` concurrent positions |
-| Position allocation | `min(25% of available margin, $2,500 USDT)` |
+| Standard position allocation | `min(25% of available margin, $2,500 USDT)` |
+| A+ position allocation | `min(35% of available margin, $3,500 USDT)` when 1H and 4H align |
 | Protective levels | SL = 1.5 ATR; TP1 = 1.5 ATR; TP2 = 3 ATR |
 | Daily breaker | Persisted: 3 consecutive losses or 5% day-start-equity loss |
 | `BINANCE_REST_URL` | Default public market-data host |
@@ -319,7 +322,7 @@ Frontend `http://localhost:3000` par aur backend default `3001` par chalta hai. 
 - Formal backtest, out-of-sample validation, benchmark, win-rate/profitability proof ya future performance forecast nahi.
 - Exchange par real buy/sell order, real account balance, real short borrowing, funding/borrow fee ya exchange order lifecycle nahi.
 - Har indicator independent vote nahi: indicators correlated ho sakte hain aur fixed vote count probability/confidence score nahi hota.
-- 25% available-margin allocation aur ATR stop koi maximum-loss guarantee nahi; market gaps, tick timing aur simulator assumptions actual P&L ko badal sakte hain.
+- 25% standard / 35% A+ available-margin allocation aur ATR stop koi maximum-loss guarantee nahi; market gaps, tick timing aur simulator assumptions actual P&L ko badal sakte hain.
 
 Isliye ise **market-data-driven paper-trading demo/strategy simulator** samjhein, verified profitable trading system ya financial advice nahi.
 

@@ -11,6 +11,8 @@ const {
 } = require('technicalindicators');
 
 const REQUIRED_CANDLES = 500;
+const MAX_HTF_SOURCE_CANDLES = 830;
+const FIFTEEN_MINUTES_MS = 15 * 60 * 1000;
 const SUPER_TREND_PERIOD = 10;
 const SUPER_TREND_MULTIPLIER = 3;
 const MIN_ENTRY_VOTES = 7;
@@ -19,6 +21,10 @@ const MIN_ENTRY_ADX = 22;
 const MAX_LONG_RSI = 68;
 const MIN_SHORT_RSI = 32;
 const TOP_OPPORTUNITIES = 2;
+const STANDARD_ALLOCATION_PERCENT = 25;
+const STANDARD_MAX_ALLOCATION = 2_500;
+const A_PLUS_ALLOCATION_PERCENT = 35;
+const A_PLUS_MAX_ALLOCATION = 3_500;
 
 function latest(values) {
   return values.length ? values[values.length - 1] : undefined;
@@ -81,7 +87,9 @@ function calculateSupertrend(candles) {
 }
 
 function validateCandles(candles) {
-  if (!Array.isArray(candles) || candles.length !== REQUIRED_CANDLES) throw insufficientData();
+  if (!Array.isArray(candles)
+    || candles.length < REQUIRED_CANDLES
+    || candles.length > MAX_HTF_SOURCE_CANDLES) throw insufficientData();
   if (!candles.every((candle) => candle.isClosed === true
     && [candle.openTime, candle.open, candle.high, candle.low, candle.close, candle.volume]
       .every(Number.isFinite)
@@ -93,6 +101,100 @@ function validateCandles(candles) {
     && candle.volume >= 0)) throw insufficientData();
   if (!candles.slice(1).every((candle, index) =>
     candle.openTime > candles[index].openTime)) throw insufficientData();
+}
+
+function resampleClosedCandles(candles, groupSize) {
+  if (!Number.isInteger(groupSize) || groupSize < 1) {
+    throw new Error('Higher-timeframe group size must be a positive integer');
+  }
+  const bucketDuration = FIFTEEN_MINUTES_MS * groupSize;
+  const groups = [];
+  let bucketStart = null;
+  let group = [];
+  const appendGroup = () => {
+    if (group.length !== groupSize) return;
+    groups.push({
+      symbol: group[0].symbol || null,
+      openTime: group[0].openTime,
+      closeTime: group[group.length - 1].closeTime,
+      open: group[0].open,
+      high: Math.max(...group.map((candle) => candle.high)),
+      low: Math.min(...group.map((candle) => candle.low)),
+      close: group[group.length - 1].close,
+      volume: group.reduce((sum, candle) => sum + candle.volume, 0),
+      isClosed: true,
+    });
+  };
+
+  for (const candle of candles) {
+    const currentBucket = Math.floor(candle.openTime / bucketDuration) * bucketDuration;
+    if (currentBucket !== bucketStart) {
+      appendGroup();
+      bucketStart = currentBucket;
+      group = candle.openTime === currentBucket ? [candle] : [];
+      continue;
+    }
+
+    const expectedOpenTime = currentBucket + group.length * FIFTEEN_MINUTES_MS;
+    if (group.length > 0 && candle.openTime === expectedOpenTime) group.push(candle);
+    else group = [];
+  }
+  appendGroup();
+  return groups;
+}
+
+function calculateHigherTimeframeTrend(candles) {
+  const close = candles.map((candle) => candle.close);
+  const latestClose = close.at(-1) ?? null;
+  const ema20 = close.length >= 20
+    ? latest(EMA.calculate({ values: close, period: 20 }))
+    : null;
+  const ema50 = close.length >= 50
+    ? latest(EMA.calculate({ values: close, period: 50 }))
+    : null;
+  const ema200 = close.length >= 200
+    ? latest(EMA.calculate({ values: close, period: 200 }))
+    : null;
+  const trend = ema50 !== null && ema20 !== null && latestClose !== null
+    ? latestClose > ema50 && ema20 > ema50
+      ? 'BULLISH'
+      : latestClose < ema50 && ema20 < ema50
+        ? 'BEARISH'
+        : 'NEUTRAL'
+    : 'NEUTRAL';
+  return {
+    trend,
+    close: latestClose,
+    ema20: ema20 ?? null,
+    ema50: ema50 ?? null,
+    ema200: ema200 ?? null,
+    candleCount: candles.length,
+  };
+}
+
+function calculateHigherTimeframeTrends(candles) {
+  const oneHourCandles = resampleClosedCandles(candles, 4);
+  const fourHourCandles = resampleClosedCandles(candles, 16);
+  return {
+    htf1h: calculateHigherTimeframeTrend(oneHourCandles),
+    htf4h: calculateHigherTimeframeTrend(fourHourCandles),
+  };
+}
+
+function getHtfEntryContext(direction, htf1hTrend, htf4hTrend) {
+  const alignedTrend = direction === 'LONG' ? 'BULLISH' : 'BEARISH';
+  const opposite = direction === 'LONG' ? 'BEARISH' : 'BULLISH';
+  const counterTrendBlocked = Boolean(direction
+    && htf1hTrend === opposite
+    && htf4hTrend === opposite);
+  const aligned = Boolean(direction
+    && htf1hTrend === alignedTrend
+    && htf4hTrend === alignedTrend);
+  return {
+    htfAlignment: aligned ? 'ALIGNED_1H_4H' : 'STANDARD',
+    allocationPercent: aligned ? A_PLUS_ALLOCATION_PERCENT : STANDARD_ALLOCATION_PERCENT,
+    counterTrendBlocked,
+  };
 }
 
 function indicatorDirection(analysis) {
@@ -117,14 +219,16 @@ function indicatorDirection(analysis) {
   return null;
 }
 
-function analyzeCandles(candles) {
+function analyzeCandles(candles, higherTimeframes = null) {
   validateCandles(candles);
 
-  const close = candles.map((candle) => candle.close);
-  const high = candles.map((candle) => candle.high);
-  const low = candles.map((candle) => candle.low);
-  const volume = candles.map((candle) => candle.volume);
-  const latestCandle = candles[candles.length - 1];
+  const strategyCandles = candles.slice(-REQUIRED_CANDLES);
+  const close = strategyCandles.map((candle) => candle.close);
+  const high = strategyCandles.map((candle) => candle.high);
+  const low = strategyCandles.map((candle) => candle.low);
+  const volume = strategyCandles.map((candle) => candle.volume);
+  const latestCandle = strategyCandles[strategyCandles.length - 1];
+  const higherTimeframeAnalysis = higherTimeframes || calculateHigherTimeframeTrends(candles);
   const rsi = latest(RSI.calculate({ values: close, period: 14 }));
   const ema20 = latest(EMA.calculate({ values: close, period: 20 }));
   const ema50 = latest(EMA.calculate({ values: close, period: 50 }));
@@ -150,7 +254,7 @@ function analyzeCandles(candles) {
   const obvSeries = OBV.calculate({ close, volume });
   const obv = latest(obvSeries);
   const obvSma20 = latest(SMA.calculate({ values: obvSeries, period: 20 }));
-  const supertrend = calculateSupertrend(candles);
+  const supertrend = calculateSupertrend(strategyCandles);
   const priorVolumes = volume.slice(-21, -1);
   if (priorVolumes.length !== 20) throw insufficientData();
   const averageVolume = priorVolumes.reduce((sum, item) => sum + item, 0) / priorVolumes.length;
@@ -178,9 +282,9 @@ function analyzeCandles(candles) {
         ? 'BULLISH'
         : stochasticRsi.k < stochasticRsi.d ? 'BEARISH' : 'NEUTRAL';
   const volumeSpikeDirection = volumeRatio >= 1.15
-    ? latestCandle.close > candles[candles.length - 2].close
+    ? latestCandle.close > strategyCandles[strategyCandles.length - 2].close
       ? 'BULLISH'
-      : latestCandle.close < candles[candles.length - 2].close ? 'BEARISH' : 'NEUTRAL'
+      : latestCandle.close < strategyCandles[strategyCandles.length - 2].close ? 'BEARISH' : 'NEUTRAL'
     : 'NEUTRAL';
   const adxDirection = adx.adx >= 20
     ? adx.pdi > adx.mdi ? 'BULLISH' : adx.mdi > adx.pdi ? 'BEARISH' : 'NEUTRAL'
@@ -222,7 +326,7 @@ function analyzeCandles(candles) {
     adx: adx.adx,
     pdi: adx.pdi,
     mdi: adx.mdi,
-    vwap: calculateVwap(candles),
+    vwap: calculateVwap(strategyCandles),
     supertrend,
     stochasticRsi,
     macd,
@@ -234,10 +338,19 @@ function analyzeCandles(candles) {
     volumeRatio,
     volumeSpikeRatio: volumeRatio,
     opportunityScore: volumeRatio * adx.adx,
+    htf1h: higherTimeframeAnalysis.htf1h,
+    htf4h: higherTimeframeAnalysis.htf4h,
+    htf1hTrend: higherTimeframeAnalysis.htf1h.trend,
+    htf4hTrend: higherTimeframeAnalysis.htf4h.trend,
     indicators,
     strategy: 'QuantConsensus 10-source closed-candle engine',
   };
-  analysis.side = indicatorDirection(analysis);
+  const direction = indicatorDirection(analysis);
+  const htfContext = getHtfEntryContext(direction, analysis.htf1hTrend, analysis.htf4hTrend);
+  analysis.side = htfContext.counterTrendBlocked ? null : direction;
+  analysis.htfAlignment = htfContext.htfAlignment;
+  analysis.allocationPercent = htfContext.allocationPercent;
+  analysis.counterTrendBlocked = htfContext.counterTrendBlocked;
   return analysis;
 }
 
@@ -255,7 +368,14 @@ function rankOpportunities(opportunities, limit = TOP_OPPORTUNITIES) {
 }
 
 function getEntrySignal(analysis) {
-  return indicatorDirection(analysis);
+  const direction = indicatorDirection(analysis);
+  if (!direction) return null;
+  const { counterTrendBlocked } = getHtfEntryContext(
+    direction,
+    analysis.htf1hTrend,
+    analysis.htf4hTrend,
+  );
+  return counterTrendBlocked ? null : direction;
 }
 
 function getConfirmedEntrySignal(analysis, confirmationAnalysis) {
@@ -263,12 +383,21 @@ function getConfirmedEntrySignal(analysis, confirmationAnalysis) {
   return direction && getEntrySignal(confirmationAnalysis) === direction ? direction : null;
 }
 
-function sizePosition({ availableMargin, entryPrice, maxAllocation = 2500 }) {
-  if (![availableMargin, entryPrice, maxAllocation].every(Number.isFinite)
-    || availableMargin <= 0 || entryPrice <= 0 || maxAllocation <= 0) {
+function sizePosition({
+  availableMargin,
+  entryPrice,
+  allocationPercent = STANDARD_ALLOCATION_PERCENT,
+  maxAllocation = allocationPercent === A_PLUS_ALLOCATION_PERCENT
+    ? A_PLUS_MAX_ALLOCATION
+    : STANDARD_MAX_ALLOCATION,
+}) {
+  if (![availableMargin, entryPrice, allocationPercent, maxAllocation].every(Number.isFinite)
+    || availableMargin <= 0 || entryPrice <= 0
+    || allocationPercent <= 0 || allocationPercent > 100
+    || maxAllocation <= 0) {
     throw new Error('Invalid inputs for paper position sizing');
   }
-  const allocatedMargin = Math.min(availableMargin * 0.25, maxAllocation);
+  const allocatedMargin = Math.min(availableMargin * allocationPercent / 100, maxAllocation);
   const quantity = Number((allocatedMargin / entryPrice).toFixed(8));
   if (!Number.isFinite(quantity) || quantity <= 0) {
     throw new Error('Paper position size must be positive');
@@ -277,6 +406,7 @@ function sizePosition({ availableMargin, entryPrice, maxAllocation = 2500 }) {
     margin: Number(allocatedMargin.toFixed(8)),
     quantity,
     allocatedMargin: Number(allocatedMargin.toFixed(8)),
+    allocationPercent,
   };
 }
 
@@ -287,6 +417,7 @@ module.exports = {
   rankOpportunities,
   sizePosition,
   REQUIRED_CANDLES,
+  MAX_HTF_SOURCE_CANDLES,
   MIN_CANDLES: REQUIRED_CANDLES,
   MIN_ENTRY_VOTES,
   MIN_ENTRY_VOLUME_RATIO,
@@ -296,4 +427,7 @@ module.exports = {
   TOP_OPPORTUNITIES,
   calculateVwap,
   calculateSupertrend,
+  resampleClosedCandles,
+  calculateHigherTimeframeTrends,
+  getHtfEntryContext,
 };

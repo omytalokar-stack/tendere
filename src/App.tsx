@@ -97,6 +97,37 @@ function formatUsd(value: number) {
   return value.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
 }
 
+function HtfTrendPill({
+  timeframe,
+  trend,
+}: {
+  timeframe: '1H' | '4H';
+  trend?: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+}) {
+  const tone = trend === 'BULLISH'
+    ? 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200'
+    : trend === 'BEARISH'
+      ? 'border-rose-400/20 bg-rose-500/10 text-rose-200'
+      : 'border-slate-400/15 bg-slate-800/60 text-slate-400';
+  return <span className={`rounded-full border px-2 py-1 text-[9px] font-mono ${tone}`}>{timeframe} {trend ?? '—'}</span>;
+}
+
+function HtfAllocationBadge({
+  alignment,
+  allocationPercent,
+  showStandard = false,
+}: {
+  alignment?: 'STANDARD' | 'ALIGNED_1H_4H';
+  allocationPercent?: 25 | 35;
+  showStandard?: boolean;
+}) {
+  if (alignment === 'ALIGNED_1H_4H') {
+    return <span className="rounded-full border border-amber-300/30 bg-amber-400/15 px-2 py-1 text-[9px] font-bold text-amber-100">A+ 35%</span>;
+  }
+  if (!showStandard) return null;
+  return <span className="rounded-full border border-purple-300/15 bg-purple-500/10 px-2 py-1 text-[9px] font-mono text-purple-100">STANDARD {allocationPercent ?? 25}%</span>;
+}
+
 function pnlFor(trade: BackendTrade, markPrice: number) {
   const direction = trade.side === 'LONG' ? 1 : -1;
   const remainingQuantity = trade.remainingQuantity ?? trade.quantity;
@@ -803,6 +834,11 @@ function HomeTab({
                 <div>
                   <h2 className="text-lg font-bold text-white">{coin.id}<span className="text-slate-400">/USDT</span></h2>
                   <p className="mt-0.5 text-[10px] text-slate-500">{new Date(trade.openedAt).toLocaleString()}</p>
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    <HtfTrendPill timeframe="1H" trend={trade.htf1hTrend} />
+                    <HtfTrendPill timeframe="4H" trend={trade.htf4hTrend} />
+                    <HtfAllocationBadge alignment={trade.htfAlignment} allocationPercent={trade.allocationPercent} showStandard />
+                  </div>
                 </div>
               </div>
               <span className={`rounded-full border px-3 py-1 text-[10px] font-mono font-bold tracking-wider ${
@@ -931,6 +967,15 @@ function StrategyTab({
                 </div>
                 <p className="mt-3 font-mono text-lg text-white">${formatPrice(market.price, coin.decimals)}</p>
                 {market.priceSource === 'ORDER_BOOK_MID' && <p className="mt-1 text-[9px] text-slate-500">Live L2 midpoint</p>}
+                <div className="mt-2 flex flex-wrap gap-1">
+                  <HtfTrendPill timeframe="1H" trend={market.indicators.htf1hTrend} />
+                  <HtfTrendPill timeframe="4H" trend={market.indicators.htf4hTrend} />
+                  <HtfAllocationBadge
+                    alignment={market.indicators.htfAlignment}
+                    allocationPercent={market.indicators.allocationPercent}
+                    showStandard={Boolean(side)}
+                  />
+                </div>
                 <div className="mt-3 flex items-center justify-between text-[10px] font-mono">
                   <span className="text-emerald-300">{buyVotes}/{totalVotes} BUY</span>
                   <span className="text-pink-300">{sellVotes}/{totalVotes} SELL</span>

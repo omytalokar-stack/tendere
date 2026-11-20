@@ -23,6 +23,16 @@ export interface ClosedCandle {
 }
 
 export type MarketDirection = 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+export type HtfAlignment = 'STANDARD' | 'ALIGNED_1H_4H';
+
+export interface HigherTimeframeAnalysis {
+  trend: MarketDirection;
+  close: number | null;
+  ema20: number | null;
+  ema50: number | null;
+  ema200: number | null;
+  candleCount: number;
+}
 
 export interface IndicatorVote {
   name: string;
@@ -58,6 +68,13 @@ export interface ConsensusAnalysis {
   volumeRatio: number;
   volumeSpikeRatio: number;
   opportunityScore: number;
+  htf1h: HigherTimeframeAnalysis;
+  htf4h: HigherTimeframeAnalysis;
+  htf1hTrend: MarketDirection;
+  htf4hTrend: MarketDirection;
+  htfAlignment: HtfAlignment;
+  allocationPercent: 25 | 35;
+  counterTrendBlocked: boolean;
   indicators: IndicatorVote[];
 }
 
@@ -80,6 +97,10 @@ export interface CandleAuditRow extends ClosedCandle {
 }
 
 const REQUIRED_CANDLES = 500;
+const MAX_HTF_SOURCE_CANDLES = 830;
+const FIFTEEN_MINUTES_MS = 15 * 60 * 1000;
+const ONE_HOUR_MS = 60 * 60 * 1000;
+const FOUR_HOURS_MS = 4 * ONE_HOUR_MS;
 const MIN_ENTRY_VOTES = 7;
 
 function latest<T>(values: T[]): T | undefined {
@@ -88,6 +109,91 @@ function latest<T>(values: T[]): T | undefined {
 
 function directionToVote(direction: MarketDirection): 'BUY' | 'SELL' | 'NEUTRAL' {
   return direction === 'BULLISH' ? 'BUY' : direction === 'BEARISH' ? 'SELL' : 'NEUTRAL';
+}
+
+export function resampleClosedCandles(
+  candles: ClosedCandle[],
+  groupSize: number,
+  sourceIntervalMs = FIFTEEN_MINUTES_MS,
+): ClosedCandle[] {
+  if (!Number.isInteger(groupSize) || groupSize < 1
+    || !Number.isFinite(sourceIntervalMs) || sourceIntervalMs <= 0) {
+    throw new Error('Higher-timeframe resampling requires a positive integer group size and interval.');
+  }
+  const bucketDuration = sourceIntervalMs * groupSize;
+  const groups: ClosedCandle[] = [];
+  let bucketStart: number | null = null;
+  let group: ClosedCandle[] = [];
+  const appendGroup = () => {
+    if (group.length !== groupSize) return;
+    groups.push({
+      time: group[0].time,
+      openTime: group[0].openTime,
+      closeTime: group[group.length - 1].closeTime,
+      open: group[0].open,
+      high: Math.max(...group.map((candle) => candle.high)),
+      low: Math.min(...group.map((candle) => candle.low)),
+      close: group[group.length - 1].close,
+      volume: group.reduce((sum, candle) => sum + candle.volume, 0),
+      isClosed: true,
+    });
+  };
+
+  for (const candle of candles) {
+    if (!candle.isClosed) continue;
+    const currentBucket = Math.floor(candle.openTime / bucketDuration) * bucketDuration;
+    if (currentBucket !== bucketStart) {
+      appendGroup();
+      bucketStart = currentBucket;
+      group = candle.openTime === currentBucket ? [candle] : [];
+      continue;
+    }
+
+    const expectedOpenTime = currentBucket + group.length * sourceIntervalMs;
+    if (group.length > 0 && candle.openTime === expectedOpenTime) group.push(candle);
+    else group = [];
+  }
+  appendGroup();
+  return groups;
+}
+
+function calculateHigherTimeframeTrend(candles: ClosedCandle[]): HigherTimeframeAnalysis {
+  const close = candles.map((candle) => candle.close);
+  const latestClose = latest(close) ?? null;
+  const ema20 = close.length >= 20
+    ? latest(EMA.calculate({ values: close, period: 20 })) ?? null
+    : null;
+  const ema50 = close.length >= 50
+    ? latest(EMA.calculate({ values: close, period: 50 })) ?? null
+    : null;
+  const ema200 = close.length >= 200
+    ? latest(EMA.calculate({ values: close, period: 200 })) ?? null
+    : null;
+  const trend: MarketDirection = ema50 !== null && ema20 !== null && latestClose !== null
+    ? latestClose > ema50 && ema20 > ema50
+      ? 'BULLISH'
+      : latestClose < ema50 && ema20 < ema50
+        ? 'BEARISH'
+        : 'NEUTRAL'
+    : 'NEUTRAL';
+  return { trend, close: latestClose, ema20, ema50, ema200, candleCount: candles.length };
+}
+
+export function calculateHigherTimeframeTrends(
+  candles: ClosedCandle[],
+  sourceIntervalMs = FIFTEEN_MINUTES_MS,
+): { htf1h: HigherTimeframeAnalysis; htf4h: HigherTimeframeAnalysis } {
+  if (!Number.isFinite(sourceIntervalMs) || sourceIntervalMs <= 0) {
+    throw new Error('Higher-timeframe source interval must be a positive number.');
+  }
+  const resampleFor = (targetIntervalMs: number) => sourceIntervalMs <= targetIntervalMs
+    && targetIntervalMs % sourceIntervalMs === 0
+    ? resampleClosedCandles(candles, targetIntervalMs / sourceIntervalMs, sourceIntervalMs)
+    : [];
+  return {
+    htf1h: calculateHigherTimeframeTrend(resampleFor(ONE_HOUR_MS)),
+    htf4h: calculateHigherTimeframeTrend(resampleFor(FOUR_HOURS_MS)),
+  };
 }
 
 export function calculateSupertrend(candles: ClosedCandle[]) {
@@ -247,8 +353,12 @@ export function buildCandleAuditRows(candles: ClosedCandle[]): CandleAuditRow[] 
   }));
 }
 
-export function analyzeClosedCandles(candles: ClosedCandle[]): ConsensusAnalysis {
-  if (candles.length !== REQUIRED_CANDLES
+export function analyzeClosedCandles(
+  candles: ClosedCandle[],
+  sourceIntervalMs = FIFTEEN_MINUTES_MS,
+): ConsensusAnalysis {
+  if (candles.length < REQUIRED_CANDLES
+    || candles.length > MAX_HTF_SOURCE_CANDLES
     || !candles.every((candle) => candle.isClosed === true
       && [candle.openTime, candle.open, candle.high, candle.low, candle.close, candle.volume]
         .every(Number.isFinite)
@@ -260,14 +370,16 @@ export function analyzeClosedCandles(candles: ClosedCandle[]): ConsensusAnalysis
       && candle.volume >= 0)
     || !candles.slice(1).every((candle, index) =>
       candle.openTime > candles[index].openTime)) {
-    throw new Error('INSUFFICIENT_HISTORICAL_DATA: exactly 500 valid closed candles are required.');
+    throw new Error(`INSUFFICIENT_HISTORICAL_DATA: between ${REQUIRED_CANDLES} and ${MAX_HTF_SOURCE_CANDLES} valid closed candles are required.`);
   }
 
-  const close = candles.map((candle) => candle.close);
-  const high = candles.map((candle) => candle.high);
-  const low = candles.map((candle) => candle.low);
-  const volume = candles.map((candle) => candle.volume);
-  const latestCandle = candles[candles.length - 1];
+  const strategyCandles = candles.slice(-REQUIRED_CANDLES);
+  const close = strategyCandles.map((candle) => candle.close);
+  const high = strategyCandles.map((candle) => candle.high);
+  const low = strategyCandles.map((candle) => candle.low);
+  const volume = strategyCandles.map((candle) => candle.volume);
+  const latestCandle = strategyCandles[strategyCandles.length - 1];
+  const higherTimeframes = calculateHigherTimeframeTrends(candles, sourceIntervalMs);
   const rsi = Number(latest(RSI.calculate({ values: close, period: 14 })));
   const ema20 = Number(latest(EMA.calculate({ values: close, period: 20 })));
   const ema50 = Number(latest(EMA.calculate({ values: close, period: 50 })));
@@ -313,7 +425,7 @@ export function analyzeClosedCandles(candles: ClosedCandle[]): ConsensusAnalysis
   const obvSeries = OBV.calculate({ close, volume });
   const obv = Number(latest(obvSeries));
   const obvSma20 = Number(latest(SMA.calculate({ values: obvSeries, period: 20 })));
-  const supertrend = calculateSupertrend(candles);
+  const supertrend = calculateSupertrend(strategyCandles);
   const priorVolumes = volume.slice(-21, -1);
   const averageVolume = priorVolumes.reduce((sum, item) => sum + item, 0) / priorVolumes.length;
   const currentVolume = latestCandle.volume;
@@ -342,7 +454,7 @@ export function analyzeClosedCandles(candles: ClosedCandle[]): ConsensusAnalysis
     ? adx.pdi > adx.mdi ? 'BULLISH' : adx.mdi > adx.pdi ? 'BEARISH' : 'NEUTRAL'
     : 'NEUTRAL';
   const volumeDirection = volumeRatio >= 1.15
-    ? latestCandle.close > candles[candles.length - 2].close
+    ? latestCandle.close > strategyCandles[strategyCandles.length - 2].close
       ? 'BULLISH'
       : latestCandle.close < candles[candles.length - 2].close ? 'BEARISH' : 'NEUTRAL'
     : 'NEUTRAL';
@@ -360,7 +472,7 @@ export function analyzeClosedCandles(candles: ClosedCandle[]): ConsensusAnalysis
   ];
   const bullishCount = indicators.filter((item) => item.direction === 'BULLISH').length;
   const bearishCount = indicators.filter((item) => item.direction === 'BEARISH').length;
-  const side = bullishCount >= MIN_ENTRY_VOTES
+  const candidateSide = bullishCount >= MIN_ENTRY_VOTES
     && latestCandle.close > ema200
     && ema20 > ema50
     && adx.adx >= 20
@@ -379,8 +491,23 @@ export function analyzeClosedCandles(candles: ClosedCandle[]): ConsensusAnalysis
       && rsi >= 32
       ? 'SHORT'
       : null;
+  const alignedTrend = candidateSide === 'LONG' ? 'BULLISH' : 'BEARISH';
+  const oppositeTrend = candidateSide === 'LONG' ? 'BEARISH' : 'BULLISH';
+  const counterTrendBlocked = Boolean(candidateSide
+    && higherTimeframes.htf1h.trend === oppositeTrend
+    && higherTimeframes.htf4h.trend === oppositeTrend);
+  const aligned = Boolean(candidateSide
+    && higherTimeframes.htf1h.trend === alignedTrend
+    && higherTimeframes.htf4h.trend === alignedTrend);
   return {
-    side,
+    side: counterTrendBlocked ? null : candidateSide,
+    htf1h: higherTimeframes.htf1h,
+    htf4h: higherTimeframes.htf4h,
+    htf1hTrend: higherTimeframes.htf1h.trend,
+    htf4hTrend: higherTimeframes.htf4h.trend,
+    htfAlignment: aligned ? 'ALIGNED_1H_4H' : 'STANDARD',
+    allocationPercent: aligned ? 35 : 25,
+    counterTrendBlocked,
     bullishCount,
     bearishCount,
     buyVotes: bullishCount,

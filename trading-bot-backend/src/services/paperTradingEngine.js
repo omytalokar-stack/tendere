@@ -11,6 +11,8 @@ const {
   getConfirmedEntrySignal,
   rankOpportunities,
   sizePosition,
+  getHtfEntryContext,
+  MAX_HTF_SOURCE_CANDLES,
   MIN_CANDLES,
 } = require('./strategy');
 const { REQUIRED_CANDLES } = require('./binanceFeed');
@@ -20,8 +22,11 @@ const {
   notifyDailyLossLimit,
 } = require('./notificationAlerts');
 const TAKER_FEE_RATE = 0;
+const STANDARD_ALLOCATION_PERCENT = 25;
 const POSITION_MARGIN_FRACTION = 0.25;
 const MAX_POSITION_MARGIN_USDT = 2_500;
+const A_PLUS_POSITION_MARGIN_FRACTION = 0.35;
+const A_PLUS_MAX_POSITION_MARGIN_USDT = 3_500;
 const STOP_LOSS_ATR_MULTIPLE = 1.5;
 const TP1_ATR_MULTIPLE = 1.5;
 const TP2_ATR_MULTIPLE = 3;
@@ -246,7 +251,8 @@ class PaperTradingEngine {
         if (existingIndex >= 0) history[existingIndex] = candle;
         else history.push(candle);
         history.sort((a, b) => a.openTime - b.openTime);
-        if (history.length > REQUIRED_CANDLES) history.splice(0, history.length - REQUIRED_CANDLES);
+        const historyLimit = interval === '15m' ? MAX_HTF_SOURCE_CANDLES : REQUIRED_CANDLES;
+        if (history.length > historyLimit) history.splice(0, history.length - historyLimit);
         if (interval === config.candleInterval) {
           this.lastProcessedCandle.set(symbol, Math.max(this.lastProcessedCandle.get(symbol) || 0, candle.openTime));
         }
@@ -272,7 +278,8 @@ class PaperTradingEngine {
         else history.push(candle);
       }
       history.sort((a, b) => a.openTime - b.openTime);
-      if (history.length > REQUIRED_CANDLES) history.splice(0, history.length - REQUIRED_CANDLES);
+      const historyLimit = interval === '15m' ? MAX_HTF_SOURCE_CANDLES : REQUIRED_CANDLES;
+      if (history.length > historyLimit) history.splice(0, history.length - historyLimit);
 
       if (candle.isFinal !== true) continue;
       if (candle.openTime <= priorTimestamp) continue;
@@ -340,7 +347,7 @@ class PaperTradingEngine {
     const histories = new Map(SYMBOLS.map((symbol) => [symbol, intervalCandles?.get(symbol) || []]));
     if (!SYMBOLS.every((symbol) => {
       const history = histories.get(symbol);
-      return history.length === REQUIRED_CANDLES
+      return history.length >= REQUIRED_CANDLES
         && history[history.length - 1].openTime === candleOpenTime
         && this.isCandleHistoryComplete(history);
     })) return;
@@ -365,10 +372,15 @@ class PaperTradingEngine {
     const opportunities = [];
     for (const symbol of SYMBOLS) {
       const history = histories.get(symbol);
-      const analysis = analyzeCandles(history);
       const confirmationAnalysis = confirmationHistories
         ? analyzeCandles(confirmationHistories.get(symbol))
         : null;
+      const analysis = analyzeCandles(history, confirmationAnalysis
+        ? {
+          htf1h: confirmationAnalysis.htf1h,
+          htf4h: confirmationAnalysis.htf4h,
+        }
+        : null);
       const direction = confirmationAnalysis
         ? getConfirmedEntrySignal(analysis, confirmationAnalysis)
         : getEntrySignal(analysis);
@@ -407,10 +419,13 @@ class PaperTradingEngine {
 
       const wallet = await VirtualWallet.findById('primary');
       if (!wallet) throw new Error('Virtual wallet has not been initialized');
+      const allocationPercent = analysis.allocationPercent;
+      const isAPlus = analysis.htfAlignment === 'ALIGNED_1H_4H';
       const position = sizePosition({
         availableMargin: wallet.availableMargin,
         entryPrice,
-        maxAllocation: MAX_POSITION_MARGIN_USDT,
+        allocationPercent,
+        maxAllocation: isAPlus ? A_PLUS_MAX_POSITION_MARGIN_USDT : MAX_POSITION_MARGIN_USDT,
       });
       if (!this.enabled
         || position.margin > wallet.availableMargin
@@ -435,12 +450,16 @@ class PaperTradingEngine {
         tp2Price,
         tp1Filled: false,
         realizedPnl: 0,
+        htf1hTrend: analysis.htf1hTrend,
+        htf4hTrend: analysis.htf4hTrend,
+        htfAlignment: analysis.htfAlignment,
+        allocationPercent: position.allocationPercent,
         quantity: position.quantity,
         margin: position.margin,
         leverage: config.leverage,
         stopLoss,
         takeProfit: tp2Price,
-        strategy: `${interval}${confirmationHistories ? ' + 15m confirmed' : ''}: ${analysis.strategy} (${direction === 'LONG' ? analysis.bullishCount : analysis.bearishCount}/${analysis.totalVotes})`,
+        strategy: `${interval}${confirmationHistories ? ' + 15m confirmed' : ''}: ${analysis.strategy} (${direction === 'LONG' ? analysis.bullishCount : analysis.bearishCount}/${analysis.totalVotes}) ${analysis.htfAlignment}`,
         openedAt: new Date(),
       });
       if (openedTrade) openTradeCount += 1;
@@ -496,7 +515,7 @@ class PaperTradingEngine {
   }
 
   isCandleHistoryComplete(candles) {
-    return candles.length === REQUIRED_CANDLES
+    return candles.length >= REQUIRED_CANDLES
       && candles.every((candle) => candle.isClosed === true)
       && candles.slice(1).every((candle, index) =>
         candles[index].closeTime + 1 === candle.openTime);
@@ -508,7 +527,7 @@ class PaperTradingEngine {
       const state = this.feedStates.get(symbol);
       const candleDataReady = config.entryIntervals.every((interval) => {
         const candles = this.candleHistories.get(interval)?.get(symbol) || [];
-        if (candles.length === REQUIRED_CANDLES && !this.isCandleHistoryComplete(candles)) {
+        if (candles.length >= REQUIRED_CANDLES && !this.isCandleHistoryComplete(candles)) {
           this.candleErrors.get(interval).set(
             symbol,
             `DATA_FEED_OFFLINE: Binance real feed failed for ${symbol}: ${interval} completed candle history contains a time gap`,
@@ -715,9 +734,21 @@ class PaperTradingEngine {
   }
 
   async openTrade(tradeData) {
+    const htfContext = getHtfEntryContext(
+      tradeData.side,
+      tradeData.htf1hTrend,
+      tradeData.htf4hTrend,
+    );
+    const isAPlus = htfContext.htfAlignment === 'ALIGNED_1H_4H';
+    const maxPositionMargin = isAPlus
+      ? A_PLUS_MAX_POSITION_MARGIN_USDT
+      : MAX_POSITION_MARGIN_USDT;
     if (!Number.isFinite(tradeData.margin)
       || tradeData.margin <= 0
-      || tradeData.margin > MAX_POSITION_MARGIN_USDT) return null;
+      || tradeData.margin > maxPositionMargin
+      || htfContext.counterTrendBlocked
+      || tradeData.htfAlignment !== htfContext.htfAlignment
+      || tradeData.allocationPercent !== htfContext.allocationPercent) return null;
     const session = await mongoose.startSession();
     try {
       let createdTrade;
@@ -735,7 +766,7 @@ class PaperTradingEngine {
             availableMargin: {
               $gte: Math.max(
                 tradeData.margin,
-                tradeData.margin / POSITION_MARGIN_FRACTION,
+                tradeData.margin / (tradeData.allocationPercent / 100),
               ),
             },
           },
@@ -758,8 +789,16 @@ class PaperTradingEngine {
           side: tradeData.side,
           quantity: tradeData.quantity,
           entryFeeUsd: tradeData.entryFeeUsd,
+          htf1hTrend: tradeData.htf1hTrend,
+          htf4hTrend: tradeData.htf4hTrend,
+          htfAlignment: tradeData.htfAlignment,
+          allocationPercent: tradeData.allocationPercent,
         });
-        this.recordAudit('TRADE', tradeData.symbol, `Opened ${tradeData.side} paper position`);
+        this.recordAudit(
+          'TRADE',
+          tradeData.symbol,
+          `Opened ${tradeData.side} paper position · HTF 1H ${tradeData.htf1hTrend} / 4H ${tradeData.htf4hTrend} · ${tradeData.htfAlignment} · ${tradeData.allocationPercent}% allocation`,
+        );
         this.dispatchNotification('trade opened', () =>
           notifyTradeOpened(createdTrade, this.logger));
       }
@@ -916,6 +955,10 @@ class PaperTradingEngine {
           id: trade.id,
           symbol: trade.symbol,
           side: trade.side,
+          htf1hTrend: trade.htf1hTrend || 'NEUTRAL',
+          htf4hTrend: trade.htf4hTrend || 'NEUTRAL',
+          htfAlignment: trade.htfAlignment || 'STANDARD',
+          allocationPercent: trade.allocationPercent || STANDARD_ALLOCATION_PERCENT,
           exitPrice,
           pnlUsd: cumulativeRealizedPnl,
           cumulativePnlUsd: cumulativeRealizedPnl,
@@ -936,7 +979,7 @@ class PaperTradingEngine {
         this.recordAudit(
           'TRADE',
           closedTrade.symbol,
-          `PARTIAL_TP1_FILLED; realized P&L ${closedTrade.realizedPnlUsd.toFixed(8)} USDT; fees deducted ${closedTrade.feesDeductedUsd.toFixed(8)} USDT; new stop-loss ${closedTrade.stopLoss}`,
+          `PARTIAL_TP1_FILLED; HTF 1H ${closedTrade.htf1hTrend} / 4H ${closedTrade.htf4hTrend}; ${closedTrade.htfAlignment}; ${closedTrade.allocationPercent}% allocation; realized P&L ${closedTrade.realizedPnlUsd.toFixed(8)} USDT; fees deducted ${closedTrade.feesDeductedUsd.toFixed(8)} USDT; new stop-loss ${closedTrade.stopLoss}`,
         );
       }
       if (closedTrade && !closedTrade.isPartialTp1) this.logger.info('Paper position closed', closedTrade);
@@ -949,7 +992,7 @@ class PaperTradingEngine {
         this.recordAudit(
           'TRADE',
           closedTrade.symbol,
-          `Closed paper position: ${closeReason}; net P&L ${closedTrade.pnlUsd.toFixed(2)} USDT${cooldownMessage}`
+          `Closed paper position: ${closeReason}; HTF 1H ${closedTrade.htf1hTrend} / 4H ${closedTrade.htf4hTrend}; ${closedTrade.htfAlignment}; ${closedTrade.allocationPercent}% allocation; net P&L ${closedTrade.pnlUsd.toFixed(2)} USDT${cooldownMessage}`
         );
       }
       return closedTrade || null;
@@ -973,6 +1016,8 @@ class PaperTradingEngine {
       riskPercent: 0,
       positionMarginFraction: POSITION_MARGIN_FRACTION,
       maxPositionMargin: MAX_POSITION_MARGIN_USDT,
+      aPlusPositionMarginFraction: A_PLUS_POSITION_MARGIN_FRACTION,
+      aPlusMaxPositionMargin: A_PLUS_MAX_POSITION_MARGIN_USDT,
       takerFeeRate: TAKER_FEE_RATE,
       rewardRiskRatio: 2,
       leverage: config.leverage,
@@ -1010,7 +1055,8 @@ class PaperTradingEngine {
       error.status = 400;
       throw error;
     }
-    const candles = this.candleHistories.get(config.candleInterval)?.get(symbol) || [];
+    const history = this.candleHistories.get(config.candleInterval)?.get(symbol) || [];
+    const candles = history.slice(-REQUIRED_CANDLES);
     const orderBook = this.orderBooks.get(symbol);
     const state = this.feedStates.get(symbol);
     const lastTradeAt = state?.lastTradeAt;
@@ -1027,9 +1073,9 @@ class PaperTradingEngine {
       .find(Boolean);
     const candleError = intervalError
       || state?.error
-      || (candles.length !== REQUIRED_CANDLES
-        ? `DATA_FEED_OFFLINE: Binance real feed failed for ${symbol}: expected ${REQUIRED_CANDLES} completed candles, received ${candles.length}`
-        : !this.isCandleHistoryComplete(candles)
+      || (history.length < REQUIRED_CANDLES
+        ? `DATA_FEED_OFFLINE: Binance real feed failed for ${symbol}: expected at least ${REQUIRED_CANDLES} completed candles, received ${history.length}`
+        : !this.isCandleHistoryComplete(history)
           ? `DATA_FEED_OFFLINE: Binance real feed failed for ${symbol}: completed candle history is invalid or contains a time gap`
           : null);
     const orderBookError = state?.orderBookError
@@ -1071,7 +1117,9 @@ class PaperTradingEngine {
       error.status = 503;
       throw error;
     }
-    const analysis = analyzeCandles(market.candles);
+    const analysis = analyzeCandles(
+      this.candleHistories.get(config.candleInterval)?.get(symbol) || market.candles,
+    );
     const book = market.orderBook;
     if (book && Number.isFinite(book.bidQuantity) && Number.isFinite(book.askQuantity)) {
       const totalQuantity = book.bidQuantity + book.askQuantity;
@@ -1110,7 +1158,7 @@ class PaperTradingEngine {
       marketAgeMs: market.marketAgeMs,
       tickCount: market.tickCount,
       nextCandleCloseAt: market.nextCandleCloseAt,
-      candleCount: market.candles.length,
+      candleCount: REQUIRED_CANDLES,
       orderBook: market.orderBook ? {
         bids: market.orderBook.bids,
         asks: market.orderBook.asks,

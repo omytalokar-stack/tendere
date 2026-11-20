@@ -359,9 +359,12 @@ test('paper trade schema persists protection state and one open position per sym
   assert.equal(trade.cooldownUntil, null);
   assert.equal(trade.tp1Filled, false);
   assert.equal(trade.realizedPnl, 0);
+  assert.equal(trade.htfAlignment, 'STANDARD');
+  assert.equal(trade.allocationPercent, 25);
   for (const field of [
     'initialQuantity', 'remainingQuantity', 'tp1Price', 'tp2Price',
-    'atr', 'highestPrice', 'lowestPrice',
+    'atr', 'highestPrice', 'lowestPrice', 'htf1hTrend', 'htf4hTrend',
+    'htfAlignment', 'allocationPercent',
   ]) {
     assert.ok(PaperTrade.schema.path(field));
   }
@@ -525,6 +528,10 @@ test('opening a position reserves only its allocated margin without a synthetic 
       margin: 2_500,
       entryFeeUsd: 0,
       quantity: 25,
+      htf1hTrend: 'BULLISH',
+      htf4hTrend: 'NEUTRAL',
+      htfAlignment: 'STANDARD',
+      allocationPercent: 25,
     });
     assert.equal(opened.id, 'paper-trade-test');
     assert.equal(notificationRequest.options.headers.Title, 'AuraAlgo: New Trade');
@@ -535,6 +542,63 @@ test('opening a position reserves only its allocated margin without a synthetic 
     });
     assert.equal(walletUpdate.update.$inc.availableMargin, -2_500);
     assert.equal(walletUpdate.update.$inc.inTradeMargin, 2_500);
+    assert.match(engine.getAuditLog()[0].message, /HTF 1H BULLISH \/ 4H NEUTRAL · STANDARD · 25% allocation/);
+  } finally {
+    mongoose.startSession = originals.startSession;
+    PaperTrade.findOne = originals.findOne;
+    PaperTrade.countDocuments = originals.countDocuments;
+    VirtualWallet.findOneAndUpdate = originals.findOneAndUpdate;
+    PaperTrade.create = originals.create;
+    global.fetch = originals.fetch;
+  }
+});
+
+test('A+ paper trade reserves 35% of available margin and persists its HTF metadata', async () => {
+  const originals = {
+    startSession: mongoose.startSession,
+    findOne: PaperTrade.findOne,
+    countDocuments: PaperTrade.countDocuments,
+    findOneAndUpdate: VirtualWallet.findOneAndUpdate,
+    create: PaperTrade.create,
+    fetch: global.fetch,
+  };
+  let walletUpdate;
+  mongoose.startSession = async () => ({
+    withTransaction: async (operation) => operation(),
+    endSession: async () => {},
+  });
+  PaperTrade.findOne = () => ({ session: async () => null });
+  PaperTrade.countDocuments = () => ({ session: async () => 0 });
+  VirtualWallet.findOneAndUpdate = async (filter, update) => {
+    walletUpdate = { filter, update };
+    return { _id: 'primary' };
+  };
+  PaperTrade.create = async ([trade]) => [{ ...trade, id: 'a-plus-trade-test' }];
+  global.fetch = async () => ({ ok: true, status: 200 });
+  try {
+    const engine = new PaperTradingEngine({ logger: { info() {}, warn() {}, error() {} } });
+    const opened = await engine.openTrade({
+      symbol: 'ETHUSDT',
+      side: 'LONG',
+      entryPrice: 100,
+      stopLoss: 95,
+      takeProfit: 110,
+      margin: 3_500,
+      entryFeeUsd: 0,
+      quantity: 35,
+      htf1hTrend: 'BULLISH',
+      htf4hTrend: 'BULLISH',
+      htfAlignment: 'ALIGNED_1H_4H',
+      allocationPercent: 35,
+    });
+    assert.equal(opened.id, 'a-plus-trade-test');
+    assert.deepEqual(walletUpdate.filter, {
+      _id: 'primary',
+      availableMargin: { $gte: 10_000 },
+    });
+    assert.equal(walletUpdate.update.$inc.availableMargin, -3_500);
+    assert.equal(walletUpdate.update.$inc.inTradeMargin, 3_500);
+    assert.match(engine.getAuditLog()[0].message, /HTF 1H BULLISH \/ 4H BULLISH · ALIGNED_1H_4H · 35% allocation/);
   } finally {
     mongoose.startSession = originals.startSession;
     PaperTrade.findOne = originals.findOne;
@@ -564,6 +628,10 @@ test('transactional trade opening refuses to exceed the configured concurrent-po
       side: 'LONG',
       margin: 100,
       entryFeeUsd: 1,
+      htf1hTrend: 'NEUTRAL',
+      htf4hTrend: 'NEUTRAL',
+      htfAlignment: 'STANDARD',
+      allocationPercent: 25,
     });
     assert.equal(opened, null);
   } finally {
@@ -632,10 +700,92 @@ test('scanner ranks candidates and opens only the top two opportunities per cand
     assert.ok(Math.abs((firstTrade.tp1Price - firstTrade.entryPrice) / riskDistance - 1) < 1e-8);
     assert.ok(Math.abs((firstTrade.tp2Price - firstTrade.entryPrice) / riskDistance - 2) < 1e-8);
     assert.equal(firstTrade.margin, 2_500);
+    assert.equal(firstTrade.allocationPercent, 25);
+    assert.equal(firstTrade.htfAlignment, 'STANDARD');
+    assert.equal(firstTrade.htf4hTrend, 'NEUTRAL');
   } finally {
     VirtualWallet.findById = originals.findById;
     PaperTrade.countDocuments = originals.countDocuments;
   }
+});
+
+test('scanner applies A+ 35% sizing when the 1H and 4H trends align', async () => {
+  const originals = {
+    findById: VirtualWallet.findById,
+    countDocuments: PaperTrade.countDocuments,
+  };
+  const interval = '15m';
+  const intervalMs = INTERVAL_MS[interval];
+  const candleOpenTime = Math.floor(Date.now() / intervalMs) * intervalMs - intervalMs;
+  const openedTrades = [];
+  VirtualWallet.findById = async () => ({ balance: 10_000, availableMargin: 10_000 });
+  PaperTrade.countDocuments = async () => 0;
+  try {
+    const engine = new PaperTradingEngine({ logger: { info() {}, warn() {}, error() {} } });
+    engine.enabled = true;
+    engine.dailyCircuitBreakerReached = async () => false;
+    engine.isSymbolCoolingDown = async () => false;
+    engine.openTrade = async (trade) => {
+      openedTrades.push(trade);
+      return trade;
+    };
+    for (const [symbolIndex, symbol] of SYMBOLS.entries()) {
+      let close = 100;
+      const upPattern = [1, -0.4, 0.8, -0.7, 1, -0.6, 0.6];
+      const finalPattern = [-1, -1, -1, 1, 1, 1, 1];
+      const history = Array.from({ length: 830 }, (_, index) => {
+        const change = index < 810
+          ? upPattern[index % upPattern.length]
+          : finalPattern[(index - 810) % finalPattern.length];
+        const open = close;
+        close += change;
+        const openTime = candleOpenTime - (829 - index) * intervalMs;
+        return {
+          symbol,
+          time: new Date(openTime),
+          openTime,
+          closeTime: openTime + intervalMs - 1,
+          open,
+          high: Math.max(open, close) + 0.3,
+          low: Math.min(open, close) - 0.3,
+          close,
+          volume: index === 829 ? (symbolIndex === 0 ? 300 : symbolIndex === 1 ? 250 : 150) : 100,
+          isFinal: true,
+          isClosed: true,
+        };
+      });
+      engine.candleHistories.get(interval).set(symbol, history);
+      engine.prices.set(symbol, close);
+      engine.feedStates.get(symbol).lastTradeAt = new Date();
+    }
+
+    await engine.scanMarketsForEntry(candleOpenTime, interval);
+    assert.equal(openedTrades.length, 2);
+    for (const trade of openedTrades) {
+      assert.equal(trade.margin, 3_500);
+      assert.equal(trade.allocationPercent, 35);
+      assert.equal(trade.htfAlignment, 'ALIGNED_1H_4H');
+      assert.equal(trade.htf1hTrend, 'BULLISH');
+      assert.equal(trade.htf4hTrend, 'BULLISH');
+    }
+  } finally {
+    VirtualWallet.findById = originals.findById;
+    PaperTrade.countDocuments = originals.countDocuments;
+  }
+});
+
+test('paper engine refuses a position when both higher timeframes oppose its side', async () => {
+  const engine = new PaperTradingEngine({ logger: { info() {}, warn() {}, error() {} } });
+  const opened = await engine.openTrade({
+    symbol: 'ETHUSDT',
+    side: 'LONG',
+    margin: 2_500,
+    htf1hTrend: 'BEARISH',
+    htf4hTrend: 'BEARISH',
+    htfAlignment: 'STANDARD',
+    allocationPercent: 25,
+  });
+  assert.equal(opened, null);
 });
 
 test('closing a losing stop updates wallet with clean quote P&L and persists failure feedback', async () => {

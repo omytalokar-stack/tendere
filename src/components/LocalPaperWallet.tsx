@@ -146,6 +146,11 @@ export function LocalPaperWallet({
                     <div><h3 className="font-mono text-sm font-bold text-white">{trade.symbol}</h3><p className="mt-1 text-[10px] text-slate-500">Entry {tradePrice(trade.entryPrice)} · {new Date(trade.openedAt).toLocaleString()}</p></div>
                     <span className={`rounded-full px-2 py-1 text-[9px] font-mono ${trade.side === 'LONG' ? 'bg-emerald-500/10 text-emerald-200' : 'bg-rose-500/10 text-rose-200'}`}>{trade.side}</span>
                   </div>
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    <span className="rounded-full border border-slate-400/15 bg-slate-800/60 px-2 py-1 text-[9px] font-mono text-slate-400">1H —</span>
+                    <span className="rounded-full border border-slate-400/15 bg-slate-800/60 px-2 py-1 text-[9px] font-mono text-slate-400">4H —</span>
+                    <span className="rounded-full border border-purple-300/15 bg-purple-500/10 px-2 py-1 text-[9px] font-mono text-purple-100">MANUAL · STANDARD 25%</span>
+                  </div>
                   <div className="mt-3 grid grid-cols-2 gap-2 text-[10px] font-mono">
                     <span className="text-slate-500">Live price <b className="text-white">{fresh ? tradePrice(mark.value) : 'waiting for fresh tick'}</b></span>
                     <span className="text-right text-slate-500">Open P&amp;L <b className={livePnl === null ? 'text-slate-400' : livePnl >= 0 ? 'text-emerald-200' : 'text-rose-200'}>{livePnl === null ? '—' : usd(livePnl)}</b></span>

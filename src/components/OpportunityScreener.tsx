@@ -176,6 +176,25 @@ export function OpportunityScreener() {
                     <span className="text-slate-400">ADX <b className="text-slate-200">{row.analysis.adx.toFixed(1)}</b></span>
                     <span className="text-right text-slate-400">Vol <b className="text-slate-200">{row.analysis.volumeSpikeRatio.toFixed(2)}x</b></span>
                   </div>
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    <span className={`rounded-full border px-2 py-1 text-[9px] font-mono ${
+                      row.analysis.htf1hTrend === 'BULLISH'
+                        ? 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200'
+                        : row.analysis.htf1hTrend === 'BEARISH'
+                          ? 'border-rose-400/20 bg-rose-500/10 text-rose-200'
+                          : 'border-slate-400/15 bg-slate-800/60 text-slate-400'
+                    }`}>1H {row.analysis.htf1hTrend}</span>
+                    <span className={`rounded-full border px-2 py-1 text-[9px] font-mono ${
+                      row.analysis.htf4hTrend === 'BULLISH'
+                        ? 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200'
+                        : row.analysis.htf4hTrend === 'BEARISH'
+                          ? 'border-rose-400/20 bg-rose-500/10 text-rose-200'
+                          : 'border-slate-400/15 bg-slate-800/60 text-slate-400'
+                    }`}>4H {row.analysis.htf4hTrend}</span>
+                    {row.analysis.htfAlignment === 'ALIGNED_1H_4H' && row.analysis.side && (
+                      <span className="rounded-full border border-amber-300/30 bg-amber-400/15 px-2 py-1 text-[9px] font-bold text-amber-100">A+ 35%</span>
+                    )}
+                  </div>
                   <div className="mt-2 flex items-center justify-between gap-2">
                     <span className="text-[9px] text-slate-500">Score {row.opportunityScore.toFixed(2)}</span>
                     <button type="button" onClick={() => setAudit(row)} className="text-[9px] font-semibold text-purple-200 hover:text-white">500-candle audit</button>
