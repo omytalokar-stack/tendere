@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const http = require('node:http');
 const mongoose = require('mongoose');
 const { config, SYMBOLS } = require('../src/config');
 const BotState = require('../src/models/BotState');
@@ -850,11 +851,32 @@ test('market APIs fail with an explicit 503 while real feed data is unavailable'
     assert.match((await candleResponse.json()).error, /^DATA_FEED_OFFLINE:/);
     assert.equal(auditResponse.status, 200);
     assert.deepEqual((await auditResponse.json()).events, []);
+    engine.getAuditLog = () => [{ message: 'x'.repeat(2048) }];
+    const compressedAuditResponse = await new Promise((resolve, reject) => {
+      const request = http.get(`http://127.0.0.1:${port}/api/bot/audit`, {
+        headers: { 'accept-encoding': 'gzip' },
+      }, (response) => {
+        const chunks = [];
+        response.on('data', (chunk) => chunks.push(chunk));
+        response.on('end', () => resolve({
+          contentEncoding: response.headers['content-encoding'],
+          body: Buffer.concat(chunks),
+        }));
+      });
+      request.on('error', reject);
+    });
+    assert.equal(compressedAuditResponse.contentEncoding, 'gzip');
+    assert.ok(compressedAuditResponse.body.length < 2048);
     const liveResponse = await fetch(`http://127.0.0.1:${port}/api/health/live`);
     const livePayload = await liveResponse.json();
     assert.equal(liveResponse.status, 200);
     assert.equal(livePayload.status, 'ok');
     assert.ok(Number.isFinite(Date.parse(livePayload.timestamp)));
+    const liveHeadResponse = await fetch(`http://127.0.0.1:${port}/api/health/live`, {
+      method: 'HEAD',
+    });
+    assert.equal(liveHeadResponse.status, 200);
+    assert.equal(await liveHeadResponse.text(), '');
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     console.error = originalConsoleError;

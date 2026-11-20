@@ -217,9 +217,16 @@ export default function App() {
     let controller: AbortController | null = null;
     let auditController: AbortController | null = null;
     let refreshing = false;
+    let refreshQueued = false;
+    let timer: number | null = null;
     const refresh = async () => {
-      if (refreshing) return;
+      if (document.visibilityState !== 'visible') return;
+      if (refreshing) {
+        refreshQueued = true;
+        return;
+      }
       refreshing = true;
+      refreshQueued = false;
       controller = new AbortController();
       auditController = new AbortController();
       const started = performance.now();
@@ -228,7 +235,7 @@ export default function App() {
           getBackendSnapshot(controller.signal),
           getBackendAudit(auditController.signal),
         ]);
-        if (disposed) return;
+        if (disposed || document.visibilityState !== 'visible') return;
         if (snapshotResult.status === 'fulfilled') {
           const nextSnapshot = snapshotResult.value;
           if (hasTradeBaseline.current) {
@@ -312,15 +319,37 @@ export default function App() {
         setLoading(false);
       } finally {
         refreshing = false;
+        if (refreshQueued && !disposed && document.visibilityState === 'visible') {
+          refreshQueued = false;
+          void refresh();
+        }
       }
     };
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 3000);
-    return () => {
-      disposed = true;
-      window.clearInterval(timer);
+    const stopPolling = () => {
+      if (timer !== null) {
+        window.clearInterval(timer);
+        timer = null;
+      }
       controller?.abort();
       auditController?.abort();
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void refresh();
+        if (timer === null) timer = window.setInterval(() => void refresh(), 15_000);
+      } else {
+        stopPolling();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    if (document.visibilityState === 'visible') {
+      void refresh();
+      timer = window.setInterval(() => void refresh(), 15_000);
+    }
+    return () => {
+      disposed = true;
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      stopPolling();
     };
   }, []);
 

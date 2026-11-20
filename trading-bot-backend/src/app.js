@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const compression = require('compression');
 const mongoose = require('mongoose');
 const BotState = require('./models/BotState');
 const PaperTrade = require('./models/PaperTrade');
@@ -84,6 +85,7 @@ async function getAgentSnapshot(engine) {
 function createApp(engine, { assistantGenerator = generateAssistantResponse } = {}) {
   const app = express();
   app.disable('x-powered-by');
+  app.use(compression());
   app.use(cors({
     origin(origin, callback) {
       if (!origin) return callback(null, true);
@@ -146,6 +148,7 @@ function createApp(engine, { assistantGenerator = generateAssistantResponse } = 
       return res.status(502).json({ error: 'Assistant provider request failed' });
     }
   });
+  app.head('/api/health/live', (req, res) => res.status(200).end());
   app.get('/api/health/live', (req, res) => res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
