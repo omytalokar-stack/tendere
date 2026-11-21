@@ -252,18 +252,9 @@ class BinanceFeed {
         const current = this.intervalData.get(interval).get(symbol);
         if (this.getHistoryError(symbol, current.candles, interval) === null) continue;
 
+        let history;
         try {
-          const history = await this.fetchCandles(symbol, interval);
-          const liveCandles = current.candles.filter((candle) => candle.isFinal);
-          const candlesByOpenTime = new Map(history.map((candle) => [candle.openTime, candle]));
-          for (const candle of liveCandles) candlesByOpenTime.set(candle.openTime, candle);
-          current.candles = [...candlesByOpenTime.values()]
-            .sort((left, right) => left.openTime - right.openTime)
-            .slice(-REQUIRED_CANDLES);
-          current.error = this.getHistoryError(symbol, current.candles, interval);
-          this.intervalData.get(interval).set(symbol, current);
-          await this.onCandle(symbol, current.candles, { historical: true, interval });
-          this.onFeedState(symbol, { error: current.error }, interval);
+          history = await this.fetchCandles(symbol, interval);
         } catch (error) {
           this.markSymbolError(symbol, error, interval);
           this.logger.error('Binance historical candle bootstrap failed', { symbol, interval, error });
@@ -276,6 +267,26 @@ class BinanceFeed {
             this.logger.warn('Binance REST IP ban detected; keeping WebSocket data live and waiting for the ban to expire.');
             break;
           }
+        }
+
+        if (!history) {
+          if (index < bootstrapTasks.length - 1) await wait(this.bootstrapSymbolDelayMs);
+          continue;
+        }
+
+        try {
+          const liveCandles = current.candles.filter((candle) => candle.isFinal);
+          const candlesByOpenTime = new Map(history.map((candle) => [candle.openTime, candle]));
+          for (const candle of liveCandles) candlesByOpenTime.set(candle.openTime, candle);
+          current.candles = [...candlesByOpenTime.values()]
+            .sort((left, right) => left.openTime - right.openTime)
+            .slice(-REQUIRED_CANDLES);
+          current.error = this.getHistoryError(symbol, current.candles, interval);
+          this.intervalData.get(interval).set(symbol, current);
+          await this.onCandle(symbol, current.candles, { historical: true, interval });
+          this.onFeedState(symbol, { error: current.error }, interval);
+        } catch (error) {
+          this.logger.error('Historical candle processing failed', { symbol, interval, error });
         }
 
         if (index < bootstrapTasks.length - 1) await wait(this.bootstrapSymbolDelayMs);
@@ -453,8 +464,7 @@ class BinanceFeed {
           this.onFeedState(event.s, { error: current.error }, interval);
         })
         .catch((error) => {
-          this.markSymbolError(event.s, error, interval);
-          this.logger.error('Candle processing failed', { symbol: event.s, error });
+          this.logger.error('Candle processing failed', { symbol: event.s, interval, error });
         });
     } catch (error) {
       if (error.code === 'ORDERBOOK_DISCONNECTED') {

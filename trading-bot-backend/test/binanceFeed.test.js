@@ -400,3 +400,43 @@ test('live WebSocket candles accumulate verified history after REST bootstrap is
   assert.equal(feed.data.get(symbol).candles.length, BinanceFeed.REQUIRED_CANDLES);
   assert.equal(feed.data.get(symbol).error, null);
 });
+
+test('engine processing failures do not convert verified candle feed data into feed errors', async () => {
+  const feedStates = [];
+  const symbol = SYMBOLS[0];
+  const interval = config.candleInterval;
+  const intervalMs = {
+    '1m': 60_000, '3m': 180_000, '5m': 300_000, '15m': 900_000,
+  }[interval] || 900_000;
+  const openTime = Math.floor(Date.now() / intervalMs) * intervalMs;
+  const feed = createFeed({
+    onCandle: async () => {
+      throw new Error('Wallet margin does not cover the open trade');
+    },
+    onFeedState: (_symbol, update) => feedStates.push(update),
+  });
+  feed.data.get(symbol).error = null;
+  feed.intervalData.get(interval).get(symbol).error = null;
+
+  feed.handleMessage(Buffer.from(JSON.stringify({
+    stream: `${symbol.toLowerCase()}@kline_${interval}`,
+    data: {
+      e: 'kline',
+      s: symbol,
+      k: {
+        t: openTime,
+        T: openTime + intervalMs - 1,
+        o: '100',
+        h: '101',
+        l: '99',
+        c: '100',
+        v: '2',
+        x: true,
+      },
+    },
+  })));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(feed.data.get(symbol).error, null);
+  assert.equal(feedStates.length, 0);
+});
