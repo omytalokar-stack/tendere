@@ -143,7 +143,7 @@ export function MarketTerminal({ onQuoteChange }: MarketTerminalProps) {
   }, []);
 
   const analysis = useMemo(() => {
-    if (candles.length !== 500) return null;
+    if (candles.length < 250) return null;
     try {
       return analyzeClosedCandles(candles);
     } catch (cause) {
@@ -192,7 +192,7 @@ export function MarketTerminal({ onQuoteChange }: MarketTerminalProps) {
           </div>
           <button
             type="button"
-            disabled={loading || candles.length !== 500}
+            disabled={loading || candles.length < 250}
             onClick={() => setChartOpen(true)}
             className="inline-flex items-center gap-2 rounded-xl border border-pink-300/25 bg-pink-500/10 px-3 py-2 text-xs font-semibold text-pink-100 transition hover:bg-pink-500/20 disabled:opacity-40"
           >
@@ -286,10 +286,10 @@ export function MarketTerminal({ onQuoteChange }: MarketTerminalProps) {
             {analysis.side && <span className="rounded-full border border-emerald-300/20 bg-emerald-500/10 px-2 py-1 font-mono text-emerald-200">{analysis.side} candidate</span>}
           </div>
         )}
-        {loading && <p role="status" className="mt-3 text-xs text-purple-200">Loading 500 finalized Binance candles…</p>}
+        {loading && <p role="status" className="mt-3 text-xs text-purple-200">Loading at least 250 finalized Binance candles…</p>}
         {error && <p role="alert" className="mt-3 break-words rounded-xl border border-rose-400/20 bg-rose-950/20 p-3 text-xs text-rose-200">{error}</p>}
-        {!loading && candles.length === 500 && !error && (
-          <p className="mt-3 text-[10px] text-slate-500">500 contiguous closed {timeframe} candles verified. Chart and indicator calculations use Binance public market data.</p>
+        {!loading && candles.length >= 250 && !error && (
+          <p className="mt-3 text-[10px] text-slate-500">{candles.length} contiguous closed {timeframe} candles verified. Chart and indicator calculations use Binance public market data.</p>
         )}
       </section>
 

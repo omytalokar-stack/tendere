@@ -10,7 +10,7 @@ const {
   StochasticRSI,
 } = require('technicalindicators');
 
-const REQUIRED_CANDLES = 500;
+const REQUIRED_CANDLES = 250;
 const MAX_HTF_SOURCE_CANDLES = 830;
 const FIFTEEN_MINUTES_MS = 15 * 60 * 1000;
 const SUPER_TREND_PERIOD = 10;

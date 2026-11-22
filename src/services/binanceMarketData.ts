@@ -85,8 +85,8 @@ export async function fetchClosedCandles(
     .map(parseKline)
     .filter((candle): candle is LiveKline => Boolean(candle?.isClosed));
   const history = closed.slice(-500);
-  if (history.length !== 500 || !isContiguous(history, timeframe)) {
-    throw new Error(`Expected 500 contiguous, completed ${timeframe} candles for ${symbol}.`);
+  if (history.length < 250 || !isContiguous(history, timeframe)) {
+    throw new Error(`Expected at least 250 contiguous, completed ${timeframe} candles for ${symbol}.`);
   }
   return history;
 }

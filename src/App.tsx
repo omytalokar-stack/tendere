@@ -616,7 +616,7 @@ export default function App() {
             </div>
           </div>
         )}
-        {snapshot && !snapshot.status.marketDataReady && (
+        {snapshot && (!snapshot.status.feedConnected || !snapshot.markets.some((market) => market.ready)) && (
           <div role="status" className="mb-5 rounded-2xl border border-amber-300/20 bg-amber-500/[0.05] p-4 text-xs text-amber-100/80">
             Backend Binance feed is reconnecting or still synchronizing. Paper entries remain blocked until market data is verified.
           </div>
@@ -1017,7 +1017,7 @@ function StrategyTab({
               </p>
             </div>
             <button
-              disabled={candleLoading || Boolean(candleError) || candles.length !== 500}
+              disabled={candleLoading || Boolean(candleError) || candles.length < 250}
               onClick={onOpenChart}
               className="rounded-xl border border-pink-300/25 bg-pink-500/10 px-4 py-2.5 text-xs font-semibold text-pink-100 transition hover:bg-pink-500/20 disabled:cursor-not-allowed disabled:opacity-40"
             >
@@ -1110,9 +1110,9 @@ function SwingRiskPanel({ candles, market, decimals, loading, error }: {
   error: string;
 }) {
   if (loading) return <SkeletonCard />;
-  if (error || candles.length !== 500) return (
+  if (error || candles.length < 250) return (
     <div className="rounded-2xl border border-purple-400/10 bg-black/15 p-4 text-xs text-slate-500">
-      Swing-risk view requires all 500 verified closed candles.
+      Swing-risk view requires at least 250 verified closed candles.
     </div>
   );
   if (market.price === null) return (
@@ -1178,7 +1178,7 @@ function HealthTab({
       </section>
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <HealthCard icon={<Radio />} label="Binance WebSocket" value={snapshot?.status.feedConnected ? 'Connected' : 'Disconnected'} ok={Boolean(snapshot?.status.feedConnected)} />
-        <HealthCard icon={<CheckCircle2 />} label="Market readiness" value={snapshot?.status.marketDataReady ? `${snapshot.status.symbols.length} markets verified` : 'Data gate closed'} ok={feedOk} />
+        <HealthCard icon={<CheckCircle2 />} label="Market readiness" value={snapshot?.status.marketDataReady ? `${snapshot.markets.filter((market) => market.ready).length}/${snapshot.status.symbols.length} markets ready` : 'Data gate closed'} ok={feedOk} />
         <HealthCard icon={<RefreshCw />} label="API refresh latency" value={latencyMs === null ? 'Unavailable' : `${latencyMs} ms`} ok={latencyMs !== null && latencyMs < 1500} />
         <HealthCard icon={<Clock />} label="Oldest live quote" value={tickAgeMs === null ? 'Unavailable' : `${(tickAgeMs / 1000).toFixed(1)} sec`} ok={tickAgeMs !== null && tickAgeMs <= 15_000} />
         <HealthCard icon={<Shield />} label="Strict risk shield" value={snapshot ? `${snapshot.status.riskPercent}% per trade` : 'Unavailable'} ok={riskOk} />

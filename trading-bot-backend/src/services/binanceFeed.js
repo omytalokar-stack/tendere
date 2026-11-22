@@ -2,7 +2,9 @@ const axios = require('axios');
 const WebSocket = require('ws');
 const { config, SYMBOLS } = require('../config');
 
-const REQUIRED_CANDLES = 500;
+const REQUIRED_CANDLES = 250;
+const MAX_CANDLES = 500;
+const MAX_TAIL_REPAIR_CANDLES = 100;
 const REQUIRED_BOOK_LEVELS = 20;
 const BOOTSTRAP_SYMBOL_DELAY_MS = 2_000;
 const REST_REQUEST_INTERVAL_MS = 150;
@@ -173,11 +175,16 @@ class BinanceFeed {
     ]));
   }
 
-  async fetchCandles(symbol, interval = config.candleInterval) {
+  async fetchCandles(symbol, interval = config.candleInterval, { startTime, limit = 501 } = {}) {
     let response;
     try {
       response = await requestRest(binanceRestUrl('/api/v3/klines'), {
-        params: { symbol, interval, limit: 501 },
+        params: {
+          symbol,
+          interval,
+          limit,
+          ...(startTime === undefined ? {} : { startTime }),
+        },
         timeout: 10_000,
       });
     } catch (cause) {
@@ -211,22 +218,23 @@ class BinanceFeed {
       && candle.close > 0
       && candle.volume >= 0);
 
-    if (closed.length < 250) {
-      const error = new Error(`INSUFFICIENT_HISTORICAL_DATA: Binance returned ${closed.length} valid closed candles for ${symbol}; at least 250 are required`);
+    const minimumCandles = startTime === undefined ? REQUIRED_CANDLES : 1;
+    if (closed.length < minimumCandles) {
+      const error = new Error(`INSUFFICIENT_HISTORICAL_DATA: Binance returned ${closed.length} valid closed candles for ${symbol}; at least ${minimumCandles} are required`);
       error.code = 'INSUFFICIENT_HISTORICAL_DATA';
       throw error;
     }
-    if (closed.length < REQUIRED_CANDLES) {
-      throw dataError(symbol, `expected ${REQUIRED_CANDLES} completed candles, received ${closed.length}`);
-    }
-    const exactHistory = closed.slice(-REQUIRED_CANDLES);
-    if (new Set(exactHistory.map((candle) => candle.openTime)).size !== REQUIRED_CANDLES) {
+    const exactHistory = closed.slice(startTime === undefined ? -MAX_CANDLES : 0);
+    if (new Set(exactHistory.map((candle) => candle.openTime)).size !== exactHistory.length) {
       throw dataError(symbol, 'completed candle timestamps are not unique');
     }
     const intervalMs = INTERVAL_MS[interval];
     if (!exactHistory.slice(1).every((candle, index) =>
       candle.openTime - exactHistory[index].openTime === intervalMs)) {
       throw dataError(symbol, 'completed candle history contains a time gap');
+    }
+    if (startTime !== undefined && exactHistory[0].openTime < startTime) {
+      throw dataError(symbol, 'tail repair returned candles before the requested start time');
     }
     return exactHistory;
   }
@@ -285,12 +293,13 @@ class BinanceFeed {
         }
 
         try {
-          const liveCandles = current.candles.filter((candle) => candle.isFinal);
           const candlesByOpenTime = new Map(history.map((candle) => [candle.openTime, candle]));
-          for (const candle of liveCandles) candlesByOpenTime.set(candle.openTime, candle);
+          for (const candle of current.candles.filter((item) => item.isFinal)) {
+            candlesByOpenTime.set(candle.openTime, candle);
+          }
           current.candles = [...candlesByOpenTime.values()]
             .sort((left, right) => left.openTime - right.openTime)
-            .slice(-REQUIRED_CANDLES);
+            .slice(-MAX_CANDLES);
           current.error = this.getHistoryError(symbol, current.candles, interval);
           this.intervalData.get(interval).set(symbol, current);
           await this.onCandle(symbol, current.candles, { historical: true, interval });
@@ -332,8 +341,11 @@ class BinanceFeed {
     const contiguous = candles.slice(1).every((item, index) =>
       candles[index].closeTime + 1 === item.openTime
       && item.isClosed === true);
-    if (candles.length !== REQUIRED_CANDLES) {
-      return dataError(symbol, `expected ${REQUIRED_CANDLES} completed candles, received ${candles.length}`).message;
+    if (candles.length < REQUIRED_CANDLES) {
+      return dataError(symbol, `expected at least ${REQUIRED_CANDLES} completed candles, received ${candles.length}`).message;
+    }
+    if (candles.length > MAX_CANDLES) {
+      return dataError(symbol, `expected no more than ${MAX_CANDLES} completed candles, received ${candles.length}`).message;
     }
     if (!candles.every((candle) => candle.isClosed === true)) {
       return dataError(symbol, 'candle history contains an unfinished candle').message;
@@ -415,8 +427,100 @@ class BinanceFeed {
       return;
     }
     if (this.bootstrapTimer) return;
-    this.bootstrapHistory().catch((error) =>
-      this.logger.error('Binance candle bootstrap after reconnect failed', error));
+    this.repairHistory().catch((error) =>
+      this.logger.error('Binance candle repair after reconnect failed', error));
+  }
+
+  async repairHistory() {
+    if (this.stopped || this.syncing || this.restIpBanned) return;
+    this.syncing = true;
+    try {
+      const tasks = config.entryIntervals.flatMap((interval) =>
+        SYMBOLS.map((symbol) => ({ interval, symbol })));
+      for (let index = 0; index < tasks.length; index += 1) {
+        const { interval, symbol } = tasks[index];
+        const current = this.intervalData.get(interval).get(symbol);
+        const existing = current.candles;
+        const intervalMs = INTERVAL_MS[interval];
+        const latestClosedOpenTime = Math.floor(Date.now() / intervalMs) * intervalMs - intervalMs;
+        const lastCandle = existing[existing.length - 1];
+        const historyValid = this.getHistoryError(symbol, existing, interval) === null;
+        if (historyValid && lastCandle.openTime >= latestClosedOpenTime) {
+          if (current.error) {
+            current.error = null;
+            this.onFeedState(symbol, { error: null }, interval);
+          }
+          continue;
+        }
+        const tailGap = lastCandle
+          ? (latestClosedOpenTime - lastCandle.openTime) / intervalMs
+          : Infinity;
+        const existingContiguous = existing.slice(1).every((candle, candleIndex) =>
+          existing[candleIndex].closeTime + 1 === candle.openTime);
+        const canRepairTail = historyValid
+          && existing.length >= REQUIRED_CANDLES
+          && existingContiguous
+          && Number.isInteger(tailGap)
+          && tailGap > 0
+          && tailGap <= MAX_TAIL_REPAIR_CANDLES;
+
+        try {
+          const fetched = canRepairTail
+            ? await this.fetchCandles(symbol, interval, {
+              startTime: lastCandle.openTime + intervalMs,
+              limit: tailGap,
+            })
+            : await this.fetchCandles(symbol, interval);
+          const candlesByOpenTime = new Map(existing.map((candle) => [candle.openTime, candle]));
+          for (const candle of fetched) {
+            if (!candlesByOpenTime.has(candle.openTime)) {
+              candlesByOpenTime.set(candle.openTime, candle);
+            }
+          }
+          current.candles = [...candlesByOpenTime.values()]
+            .sort((left, right) => left.openTime - right.openTime)
+            .slice(-MAX_CANDLES);
+          current.error = this.getHistoryError(symbol, current.candles, interval);
+          this.onFeedState(symbol, { error: current.error }, interval);
+          if (current.error) {
+            this.logger.warn(`Binance candle history remains incomplete for ${symbol} ${interval}`);
+          } else {
+            await this.onCandle(symbol, current.candles, { historical: true, interval });
+          }
+        } catch (error) {
+          this.markSymbolError(symbol, error, interval);
+          this.logger.error('Binance candle repair failed', { symbol, interval, error });
+          if (error.isIpBan || error.status === 418) {
+            this.restIpBanned = true;
+            this.restBanRetryAfterMs = Math.max(
+              this.restBanRetryAfterMs,
+              error.retryAfterMs || DEFAULT_BAN_COOLDOWN_MS,
+            );
+            break;
+          }
+        }
+
+        if (index < tasks.length - 1) await wait(this.bootstrapSymbolDelayMs);
+      }
+
+      this.initialized = config.entryIntervals.every((interval) =>
+        SYMBOLS.every((symbol) => this.getHistoryError(
+          symbol,
+          this.intervalData.get(interval).get(symbol).candles,
+          interval,
+        ) === null));
+      if (this.restIpBanned) {
+        this.scheduleBootstrapRetry({ retryAfterMs: this.restBanRetryAfterMs }, { afterIpBan: true });
+      } else if (!this.initialized) {
+        this.scheduleBootstrapRetry();
+      }
+    } finally {
+      this.syncing = false;
+      if (this.bootstrapRequested) {
+        this.bootstrapRequested = false;
+        this.requestBootstrap();
+      }
+    }
   }
 
   handleMessage(buffer) {
@@ -488,7 +592,7 @@ class BinanceFeed {
           const current = intervalData.get(event.s);
           current.candles = [...current.candles.filter((item) => item.openTime !== candle.openTime), candle]
             .sort((left, right) => left.openTime - right.openTime)
-            .slice(-REQUIRED_CANDLES);
+            .slice(-MAX_CANDLES);
           current.error = this.getHistoryError(event.s, current.candles, interval);
           intervalData.set(event.s, current);
           this.onFeedState(event.s, { error: current.error }, interval);
@@ -553,6 +657,7 @@ class BinanceFeed {
 
 module.exports = BinanceFeed;
 module.exports.REQUIRED_CANDLES = REQUIRED_CANDLES;
+module.exports.MAX_CANDLES = MAX_CANDLES;
 module.exports.REQUIRED_BOOK_LEVELS = REQUIRED_BOOK_LEVELS;
 module.exports.BOOTSTRAP_SYMBOL_DELAY_MS = BOOTSTRAP_SYMBOL_DELAY_MS;
 module.exports.REST_REQUEST_INTERVAL_MS = REST_REQUEST_INTERVAL_MS;

@@ -305,7 +305,7 @@ test('two consecutive recent symbol losses persist a six-hour cooldown', async (
   }
 });
 
-test('stale trade ticks keep the scanner unready even when a fresh book can display a midpoint', () => {
+test('a fresh order book or trade quote makes only that symbol ready within the 45-second tolerance', () => {
   const engine = new PaperTradingEngine({ logger: { info() {}, warn() {}, error() {} } });
   const candlesByInterval = new Map(config.entryIntervals.map((interval) => {
     const intervalMs = INTERVAL_MS[interval];
@@ -338,7 +338,7 @@ test('stale trade ticks keep the scanner unready even when a fresh book can disp
     bidNotional: 0,
     askNotional: 0,
     levelCount: 20,
-    updatedAt: new Date(),
+    updatedAt: new Date(Date.now() - 60_000),
   };
   engine.feed.connected = true;
   for (const symbol of SYMBOLS) {
@@ -360,18 +360,63 @@ test('stale trade ticks keep the scanner unready even when a fresh book can disp
   const market = engine.getMarketSnapshot('ETHUSDT');
   assert.equal(market.ready, false);
   assert.equal(market.price, 100);
-  assert.equal(market.priceSource, 'ORDER_BOOK_MID');
-  assert.ok(market.marketAgeMs < 15_000);
+  assert.equal(market.priceSource, null);
+  assert.ok(market.marketAgeMs >= 60_000);
 
-  for (const symbol of SYMBOLS) {
-    engine.feedStates.get(symbol).lastTradeAt = new Date();
-  }
+  engine.orderBooks.set('ETHUSDT', { ...orderBook, updatedAt: new Date() });
   assert.equal(engine.allMarketDataReady(), true);
   assert.equal(engine.getMarketSnapshot('ETHUSDT').ready, true);
+  assert.equal(engine.getMarketSnapshot('ETHUSDT').priceSource, 'ORDER_BOOK_MID');
 
   engine.orderBooks.set('ETHUSDT', { ...orderBook, updatedAt: new Date(Date.now() - 60_000) });
-  assert.equal(engine.allMarketDataReady(), true);
+  engine.feedStates.get('ETHUSDT').lastTradeAt = new Date(Date.now() - 40_000);
   assert.equal(engine.getMarketSnapshot('ETHUSDT').ready, true);
+  engine.feedStates.get('ETHUSDT').lastTradeAt = new Date(Date.now() - 46_000);
+  assert.equal(engine.getMarketSnapshot('ETHUSDT').ready, false);
+});
+
+test('scanner evaluates a ready symbol without requiring every configured symbol to be synchronized', async () => {
+  const engine = new PaperTradingEngine({ logger: { info() {}, warn() {}, error() {} } });
+  const symbol = SYMBOLS[0];
+  const interval = config.candleInterval;
+  const intervalMs = INTERVAL_MS[interval];
+  const candleOpenTime = Math.floor(Date.now() / intervalMs) * intervalMs - intervalMs;
+  const historyByInterval = new Map(config.entryIntervals.map((entryInterval) => {
+    const duration = INTERVAL_MS[entryInterval];
+    const latestOpenTime = Math.floor(Date.now() / duration) * duration - duration;
+    const history = Array.from({ length: 250 }, (_, index) => {
+      const openTime = latestOpenTime - (249 - index) * duration;
+      return {
+        time: new Date(openTime),
+        openTime,
+        closeTime: openTime + duration - 1,
+        open: 100,
+        high: 101,
+        low: 99,
+        close: 100,
+        volume: 10,
+        isFinal: true,
+        isClosed: true,
+      };
+    });
+    return [entryInterval, history];
+  }));
+  for (const [entryInterval, history] of historyByInterval) {
+    engine.candleHistories.get(entryInterval).set(symbol, history);
+    engine.candleErrors.get(entryInterval).set(symbol, null);
+  }
+  engine.feed.connected = true;
+  engine.prices.set(symbol, 100);
+  engine.feedStates.set(symbol, { error: null, lastTradeAt: new Date() });
+  let breakerChecks = 0;
+  engine.dailyCircuitBreakerReached = async () => {
+    breakerChecks += 1;
+    return true;
+  };
+
+  assert.equal(engine.allMarketDataReady(), true);
+  await engine.scanMarketsForEntry(candleOpenTime, interval);
+  assert.equal(breakerChecks, 1);
 });
 
 test('paper exits use the latest fresh verified Binance trade tick without simulated slippage', async () => {
@@ -730,10 +775,31 @@ test('scanner ranks candidates and opens only the top two opportunities per cand
           isClosed: true,
         };
       });
-      engine.candleHistories.get(interval).set(symbol, history);
+      for (const entryInterval of config.entryIntervals) {
+        const entryHistory = entryInterval === interval ? history : Array.from({ length: 250 }, (_, index) => {
+          const duration = INTERVAL_MS[entryInterval];
+          const openTime = Math.floor(Date.now() / duration) * duration - (250 - index) * duration;
+          return {
+            symbol,
+            time: new Date(openTime),
+            openTime,
+            closeTime: openTime + duration - 1,
+            open: 100,
+            high: 101,
+            low: 99,
+            close: 100,
+            volume: 100,
+            isFinal: true,
+            isClosed: true,
+          };
+        });
+        engine.candleHistories.get(entryInterval).set(symbol, entryHistory);
+        engine.candleErrors.get(entryInterval).set(symbol, null);
+      }
       engine.prices.set(symbol, close);
-      engine.feedStates.get(symbol).lastTradeAt = new Date();
+      engine.feedStates.set(symbol, { error: null, lastTradeAt: new Date() });
     }
+    engine.feed.connected = true;
 
     await engine.scanMarketsForEntry(candleOpenTime, interval);
     assert.deepEqual(openedSymbols, ['BTCUSDT', 'ETHUSDT']);
@@ -796,10 +862,31 @@ test('scanner applies A+ 35% sizing when the 1H and 4H trends align', async () =
           isClosed: true,
         };
       });
-      engine.candleHistories.get(interval).set(symbol, history);
+      for (const entryInterval of config.entryIntervals) {
+        const entryHistory = entryInterval === interval ? history : Array.from({ length: 250 }, (_, index) => {
+          const duration = INTERVAL_MS[entryInterval];
+          const openTime = Math.floor(Date.now() / duration) * duration - (250 - index) * duration;
+          return {
+            symbol,
+            time: new Date(openTime),
+            openTime,
+            closeTime: openTime + duration - 1,
+            open: 100,
+            high: 101,
+            low: 99,
+            close: 100,
+            volume: 100,
+            isFinal: true,
+            isClosed: true,
+          };
+        });
+        engine.candleHistories.get(entryInterval).set(symbol, entryHistory);
+        engine.candleErrors.get(entryInterval).set(symbol, null);
+      }
       engine.prices.set(symbol, close);
-      engine.feedStates.get(symbol).lastTradeAt = new Date();
+      engine.feedStates.set(symbol, { error: null, lastTradeAt: new Date() });
     }
+    engine.feed.connected = true;
 
     await engine.scanMarketsForEntry(candleOpenTime, interval);
     assert.equal(openedTrades.length, 2);

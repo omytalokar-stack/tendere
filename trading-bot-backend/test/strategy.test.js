@@ -75,17 +75,17 @@ function qualifyingShort(overrides = {}) {
   };
 }
 
-test('analysis requires at least 500 valid closed candles and returns 10 equally weighted indicators', () => {
+test('analysis requires at least 250 valid closed candles and returns 10 equally weighted indicators', () => {
   assert.throws(() => analyzeCandles([]), { code: 'INSUFFICIENT_HISTORICAL_DATA' });
   assert.throws(
-    () => analyzeCandles(trendingCandles().slice(1)),
+    () => analyzeCandles(trendingCandles(1, REQUIRED_CANDLES).slice(1)),
     { code: 'INSUFFICIENT_HISTORICAL_DATA' },
   );
-  const unclosed = trendingCandles();
-  unclosed[499].isClosed = false;
+  const unclosed = trendingCandles(1, REQUIRED_CANDLES);
+  unclosed[REQUIRED_CANDLES - 1].isClosed = false;
   assert.throws(() => analyzeCandles(unclosed), { code: 'INSUFFICIENT_HISTORICAL_DATA' });
 
-  const analysis = analyzeCandles(trendingCandles());
+  const analysis = analyzeCandles(trendingCandles(1, REQUIRED_CANDLES));
   assert.equal(analysis.totalVotes, 10);
   assert.ok(analysis.indicators.every((indicator) => indicator.weight === 1));
   assert.deepEqual(analysis.indicators.map(({ name }) => name), [
@@ -120,7 +120,7 @@ test('higher-timeframe trends use only complete contiguous 15m groups and wait f
   assert.equal(trends.htf4h.ema200, null);
 
   const incomplete = calculateHigherTimeframeTrends(trendingCandles());
-  assert.equal(incomplete.htf4h.candleCount, 31);
+  assert.equal(incomplete.htf4h.candleCount, 15);
   assert.equal(incomplete.htf4h.ema50, null);
   assert.equal(incomplete.htf4h.trend, 'NEUTRAL');
   const withGap = candles.filter((_, index) => index !== 10);

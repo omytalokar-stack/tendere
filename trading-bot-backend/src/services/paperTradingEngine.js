@@ -15,7 +15,7 @@ const {
   MAX_HTF_SOURCE_CANDLES,
   MIN_CANDLES,
 } = require('./strategy');
-const { REQUIRED_CANDLES } = require('./binanceFeed');
+const { REQUIRED_CANDLES, MAX_CANDLES } = require('./binanceFeed');
 const {
   notifyTradeOpened,
   notifyTradeClosed,
@@ -36,7 +36,7 @@ const MAX_OPPORTUNITIES_PER_SCAN = 2;
 const COOLDOWN_CANDLES = 3;
 const SYMBOL_LOSING_STREAK_LOOKBACK_MS = 12 * 60 * 60 * 1000;
 const SYMBOL_LOSING_STREAK_COOLDOWN = 6 * 60 * 60 * 1000;
-const MAX_MARKET_DATA_AGE_MS = 15_000;
+const MAX_MARKET_DATA_AGE_MS = 45_000;
 const CANDLE_INTERVAL_MS = {
   '1m': 60_000, '3m': 180_000, '5m': 300_000, '15m': 900_000,
   '30m': 1_800_000, '1h': 3_600_000, '2h': 7_200_000, '4h': 14_400_000,
@@ -99,7 +99,8 @@ class PaperTradingEngine {
     ]));
     this.lastProcessedCandle = new Map();
     this.lastProcessedByInterval = new Map();
-    this.lastEntryScanCandleOpenTime = new Map(config.entryIntervals.map((interval) => [interval, 0]));
+    this.lastEntryScanCandleOpenTime = new Map(config.entryIntervals.flatMap((interval) =>
+      SYMBOLS.map((symbol) => [`${interval}:${symbol}`, 0])));
     this.orderBooks = new Map();
     this.pendingExits = new Map();
     this.closingTrades = new Set();
@@ -326,7 +327,7 @@ class PaperTradingEngine {
         if (existingIndex >= 0) history[existingIndex] = candle;
         else history.push(candle);
         history.sort((a, b) => a.openTime - b.openTime);
-        const historyLimit = interval === '15m' ? MAX_HTF_SOURCE_CANDLES : REQUIRED_CANDLES;
+        const historyLimit = interval === '15m' ? MAX_HTF_SOURCE_CANDLES : MAX_CANDLES;
         if (history.length > historyLimit) history.splice(0, history.length - historyLimit);
         if (interval === config.candleInterval) {
           this.lastProcessedCandle.set(symbol, Math.max(this.lastProcessedCandle.get(symbol) || 0, candle.openTime));
@@ -353,7 +354,7 @@ class PaperTradingEngine {
         else history.push(candle);
       }
       history.sort((a, b) => a.openTime - b.openTime);
-      const historyLimit = interval === '15m' ? MAX_HTF_SOURCE_CANDLES : REQUIRED_CANDLES;
+      const historyLimit = interval === '15m' ? MAX_HTF_SOURCE_CANDLES : MAX_CANDLES;
       if (history.length > historyLimit) history.splice(0, history.length - historyLimit);
 
       if (candle.isFinal !== true) continue;
@@ -411,31 +412,34 @@ class PaperTradingEngine {
     }
 
     if (!this.enabled) return;
-    if (!this.allMarketDataReady()) return;
     await this.scanMarketsForEntry(candle.openTime, interval);
   }
 
   async scanMarketsForEntry(candleOpenTime, interval = config.candleInterval) {
-    const lastScanTime = this.lastEntryScanCandleOpenTime.get(interval) || 0;
-    if (candleOpenTime <= lastScanTime) return;
     const intervalCandles = this.candleHistories.get(interval);
     const histories = new Map(SYMBOLS.map((symbol) => [symbol, intervalCandles?.get(symbol) || []]));
-    if (!SYMBOLS.every((symbol) => {
-      const history = histories.get(symbol);
-      return history.length >= REQUIRED_CANDLES
-        && history[history.length - 1].openTime === candleOpenTime
-        && this.isCandleHistoryComplete(history);
-    })) return;
-
-    this.lastEntryScanCandleOpenTime.set(interval, candleOpenTime);
     const confirmationHistories = interval === '5m'
       ? new Map(SYMBOLS.map((symbol) => [
         symbol,
         this.candleHistories.get('15m')?.get(symbol) || [],
       ]))
       : null;
-    if (confirmationHistories && !SYMBOLS.every((symbol) =>
-      this.isCandleHistoryComplete(confirmationHistories.get(symbol)))) return;
+    const scanSymbols = SYMBOLS.filter((symbol) => {
+      const history = histories.get(symbol);
+      const scanKey = `${interval}:${symbol}`;
+      const lastScanTime = this.lastEntryScanCandleOpenTime.get(scanKey) || 0;
+      return candleOpenTime > lastScanTime
+        && history.length >= REQUIRED_CANDLES
+        && history[history.length - 1].openTime === candleOpenTime
+        && this.isCandleHistoryComplete(history)
+        && (!confirmationHistories
+          || this.isCandleHistoryComplete(confirmationHistories.get(symbol)))
+        && this.getMarketSnapshot(symbol).ready;
+    });
+    if (!scanSymbols.length) return;
+    for (const symbol of scanSymbols) {
+      this.lastEntryScanCandleOpenTime.set(`${interval}:${symbol}`, candleOpenTime);
+    }
     if (await this.dailyCircuitBreakerReached()) return;
 
     let openTradeCount = await PaperTrade.countDocuments({ status: 'OPEN' });
@@ -445,7 +449,7 @@ class PaperTradingEngine {
     if (!initializedWallet) throw new Error('Virtual wallet has not been initialized');
 
     const opportunities = [];
-    for (const symbol of SYMBOLS) {
+    for (const symbol of scanSymbols) {
       const history = histories.get(symbol);
       const confirmationAnalysis = confirmationHistories
         ? analyzeCandles(confirmationHistories.get(symbol))
@@ -581,24 +585,27 @@ class PaperTradingEngine {
   }
 
   isOrderBookFresh(orderBook) {
-    return Boolean(orderBook
-      && Date.now() - new Date(orderBook.updatedAt).getTime() <= MAX_MARKET_DATA_AGE_MS
+    if (!orderBook) return false;
+    const age = Date.now() - new Date(orderBook.updatedAt).getTime();
+    return age >= 0
+      && age <= MAX_MARKET_DATA_AGE_MS
       && orderBook.bids.length >= 20
       && orderBook.asks.length >= 20
       && Number.isFinite(orderBook.bestBid)
-      && Number.isFinite(orderBook.bestAsk));
+      && Number.isFinite(orderBook.bestAsk);
   }
 
   isCandleHistoryComplete(candles) {
     return candles.length >= REQUIRED_CANDLES
+      && candles.length <= MAX_HTF_SOURCE_CANDLES
       && candles.every((candle) => candle.isClosed === true)
       && candles.slice(1).every((candle, index) =>
         candles[index].closeTime + 1 === candle.openTime);
   }
 
   allMarketDataReady() {
-    if (!this.feed.connected) return false;
-    return SYMBOLS.every((symbol) => {
+    return SYMBOLS.some((symbol) => {
+      if (!this.feed.connected) return false;
       const state = this.feedStates.get(symbol);
       const candleDataReady = config.entryIntervals.every((interval) => {
         const candles = this.candleHistories.get(interval)?.get(symbol) || [];
@@ -612,7 +619,8 @@ class PaperTradingEngine {
           && !this.candleErrors.get(interval)?.get(symbol);
       });
       return candleDataReady
-        && this.isTradeQuoteFresh(symbol, this.prices.get(symbol), state?.lastTradeAt);
+        && (this.isTradeQuoteFresh(symbol, this.prices.get(symbol), state?.lastTradeAt)
+          || this.isOrderBookFresh(this.orderBooks.get(symbol)));
     });
   }
 
@@ -1131,7 +1139,7 @@ class PaperTradingEngine {
       throw error;
     }
     const history = this.candleHistories.get(config.candleInterval)?.get(symbol) || [];
-    const candles = history.slice(-REQUIRED_CANDLES);
+    const candles = history.slice(-MAX_CANDLES);
     const orderBook = this.orderBooks.get(symbol);
     const state = this.feedStates.get(symbol);
     const lastTradeAt = state?.lastTradeAt;
@@ -1175,7 +1183,7 @@ class PaperTradingEngine {
       tickCount: this.tickCounts.get(symbol) || 0,
       nextCandleCloseAt: nextCandleCloseAt ? new Date(nextCandleCloseAt).toISOString() : null,
       candleError,
-      ready: !candleError && tradePriceFresh && this.feed.connected,
+      ready: !candleError && (tradePriceFresh || orderBookFresh) && this.feed.connected,
       orderBookError,
     };
   }
@@ -1213,7 +1221,7 @@ class PaperTradingEngine {
   getAllMarketSnapshots({ allowUnavailable = false } = {}) {
     const markets = SYMBOLS.map((symbol) => this.getMarketSnapshot(symbol));
     const unavailable = markets.find((market) => !market.ready);
-    if (unavailable && !allowUnavailable) {
+    if (unavailable && !allowUnavailable && !markets.some((market) => market.ready)) {
       const error = new Error(unavailable.candleError || `DATA_FEED_OFFLINE: Binance real feed failed for ${unavailable.symbol}: live trade quote is stale`);
       error.status = 503;
       throw error;

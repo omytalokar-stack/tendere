@@ -197,8 +197,8 @@ function createApp(engine, { assistantGenerator = generateAssistantResponse } = 
         error.status = 503;
         throw error;
       }
-      if (market.candles.length !== 500) {
-        const error = new Error(`DATA_FEED_OFFLINE: Binance real feed failed for ${market.symbol}: expected 500 completed candles, received ${market.candles.length}`);
+      if (market.candles.length < 250) {
+        const error = new Error(`DATA_FEED_OFFLINE: Binance real feed failed for ${market.symbol}: expected at least 250 completed candles, received ${market.candles.length}`);
         error.status = 503;
         throw error;
       }

@@ -241,7 +241,7 @@ export async function getBackendSnapshot(signal?: AbortSignal): Promise<BackendS
       && (market.ready
         ? market.price !== null
           && market.priceSource !== null
-          && market.candleCount === 500
+          && market.candleCount >= 250
           && market.marketAgeMs !== null
           && market.indicators?.totalVotes === 10
           && market.indicators.indicators.length === 10
@@ -292,13 +292,14 @@ export async function getRealCandles(symbol: string, signal?: AbortSignal): Prom
   if (response.candles.length < 250) {
     throw new Error(`INSUFFICIENT_HISTORICAL_DATA: received fewer than 250 finalized Binance candles for ${symbol}`);
   }
-  if (response.candles.length !== 500
+  if (response.candles.length < 250
+    || response.candles.length > 500
     || !response.candles.every((candle) => candle.isFinal === true
       && [candle.openTime, candle.closeTime, candle.open, candle.high, candle.low, candle.close, candle.volume]
         .every(Number.isFinite))
     || !response.candles.slice(1).every((candle, index) =>
       response.candles[index].closeTime + 1 === candle.openTime)) {
-    throw new Error(`DATA_FEED_OFFLINE: expected 500 valid finalized Binance candles for ${symbol}`);
+    throw new Error(`DATA_FEED_OFFLINE: expected 250-500 valid finalized Binance candles for ${symbol}`);
   }
   return response.candles;
 }

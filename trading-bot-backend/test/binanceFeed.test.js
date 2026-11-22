@@ -88,6 +88,34 @@ test('historical candles use the configured REST host and validate real closed h
   }
 });
 
+test('250 contiguous finalized candles satisfy feed readiness while retaining a 500-candle cap', () => {
+  const feed = createFeed();
+  const interval = config.candleInterval;
+  const duration = {
+    '1m': 60_000, '3m': 180_000, '5m': 300_000, '15m': 900_000,
+  }[interval] || 900_000;
+  const latestOpenTime = Math.floor(Date.now() / duration) * duration - duration;
+  const candles = Array.from({ length: BinanceFeed.REQUIRED_CANDLES }, (_, index) => {
+    const openTime = latestOpenTime - (BinanceFeed.REQUIRED_CANDLES - index - 1) * duration;
+    return {
+      time: new Date(openTime),
+      openTime,
+      closeTime: openTime + duration - 1,
+      open: 100,
+      high: 101,
+      low: 99,
+      close: 100,
+      volume: 2,
+      isFinal: true,
+      isClosed: true,
+    };
+  });
+
+  assert.equal(feed.getHistoryError(SYMBOLS[0], candles, interval), null);
+  assert.match(feed.getHistoryError(SYMBOLS[0], candles.slice(1), interval), /at least 250/);
+  assert.equal(BinanceFeed.MAX_CANDLES, 500);
+});
+
 test('historical bootstrap parses Binance IP-ban expiry when Retry-After is absent', async () => {
   const originalGet = axios.get;
   const originalUrl = config.binanceRestUrl;
@@ -224,8 +252,8 @@ test('WebSocket reconnect repairs candle gaps and clears transient feed errors',
   for (const interval of config.entryIntervals) {
     const duration = intervalMs[interval];
     const latestOpenTime = Math.floor(Date.now() / duration) * duration - duration;
-    const history = Array.from({ length: BinanceFeed.REQUIRED_CANDLES }, (_, index) => {
-      const openTime = latestOpenTime - (BinanceFeed.REQUIRED_CANDLES - index - 1) * duration;
+    const history = Array.from({ length: BinanceFeed.MAX_CANDLES }, (_, index) => {
+      const openTime = latestOpenTime - (BinanceFeed.MAX_CANDLES - index - 1) * duration;
       return {
         time: new Date(openTime),
         openTime,
@@ -251,10 +279,13 @@ test('WebSocket reconnect repairs candle gaps and clears transient feed errors',
   const gapSymbol = SYMBOLS[0];
   const gapInterval = config.entryIntervals[0];
   const gapData = feed.intervalData.get(gapInterval).get(gapSymbol);
-  gapData.candles = gapData.candles.slice(1);
-  feed.fetchCandles = async (symbol, interval) => {
-    fetched.push({ symbol, interval });
-    return histories.get(interval);
+  gapData.candles = gapData.candles.slice(0, -1);
+  feed.fetchCandles = async (symbol, interval, options) => {
+    fetched.push({ symbol, interval, options });
+    const history = histories.get(interval);
+    return options?.startTime === undefined
+      ? history
+      : history.filter((candle) => candle.openTime >= options.startTime);
   };
   feed.bootstrapSymbolDelayMs = 0;
   feed.stopped = false;
@@ -263,7 +294,12 @@ test('WebSocket reconnect repairs candle gaps and clears transient feed errors',
   feed.handleSocketOpen();
   while (feed.syncing) await new Promise((resolve) => setImmediate(resolve));
 
-  assert.deepEqual(fetched, [{ symbol: gapSymbol, interval: gapInterval }]);
+  assert.equal(fetched.length, 1);
+  assert.equal(fetched[0].symbol, gapSymbol);
+  assert.equal(fetched[0].interval, gapInterval);
+  assert.equal(fetched[0].options.startTime, histories.get(gapInterval).at(-1).openTime);
+  assert.equal(fetched[0].options.limit, 1);
+  assert.equal(gapData.candles.length, BinanceFeed.MAX_CANDLES);
   assert.equal(feed.initialized, true);
   assert.ok(SYMBOLS.every((symbol) => config.entryIntervals.every((interval) =>
     feed.intervalData.get(interval).get(symbol).error === null)));
@@ -311,8 +347,8 @@ test('418 pauses REST bootstrap until the ban expires, then restores history whi
   const histories = new Map(config.entryIntervals.map((interval) => {
     const intervalMs = intervalDurations[interval];
     const latestOpenTime = Math.floor(Date.now() / intervalMs) * intervalMs - intervalMs;
-    return [interval, Array.from({ length: BinanceFeed.REQUIRED_CANDLES }, (_, index) => {
-      const openTime = latestOpenTime - (BinanceFeed.REQUIRED_CANDLES - index - 1) * intervalMs;
+    return [interval, Array.from({ length: BinanceFeed.MAX_CANDLES }, (_, index) => {
+      const openTime = latestOpenTime - (BinanceFeed.MAX_CANDLES - index - 1) * intervalMs;
       return {
         time: new Date(openTime),
         openTime,
