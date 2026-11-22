@@ -208,6 +208,70 @@ test('WebSocket trade, depth, and closed-kline events update live feed state', a
   assert.equal(feed.intervalData.get('5m').get(symbol).candles.length, 1);
 });
 
+test('WebSocket reconnect repairs candle gaps and clears transient feed errors', async () => {
+  const feedStates = [];
+  const fetched = [];
+  const feed = createFeed({
+    onFeedState: (symbol, state, interval) => feedStates.push({ symbol, state, interval }),
+  });
+  const intervalMs = {
+    '1m': 60_000, '3m': 180_000, '5m': 300_000, '15m': 900_000,
+    '30m': 1_800_000, '1h': 3_600_000, '2h': 7_200_000, '4h': 14_400_000,
+    '6h': 21_600_000, '8h': 28_800_000, '12h': 43_200_000, '1d': 86_400_000,
+  };
+  const histories = new Map();
+
+  for (const interval of config.entryIntervals) {
+    const duration = intervalMs[interval];
+    const latestOpenTime = Math.floor(Date.now() / duration) * duration - duration;
+    const history = Array.from({ length: BinanceFeed.REQUIRED_CANDLES }, (_, index) => {
+      const openTime = latestOpenTime - (BinanceFeed.REQUIRED_CANDLES - index - 1) * duration;
+      return {
+        time: new Date(openTime),
+        openTime,
+        closeTime: openTime + duration - 1,
+        open: 100,
+        high: 101,
+        low: 99,
+        close: 100,
+        volume: 2,
+        isFinal: true,
+        isClosed: true,
+      };
+    });
+    histories.set(interval, history);
+
+    for (const symbol of SYMBOLS) {
+      const current = feed.intervalData.get(interval).get(symbol);
+      current.candles = history;
+      current.error = 'DATA_FEED_OFFLINE: Binance WebSocket disconnected';
+    }
+  }
+
+  const gapSymbol = SYMBOLS[0];
+  const gapInterval = config.entryIntervals[0];
+  const gapData = feed.intervalData.get(gapInterval).get(gapSymbol);
+  gapData.candles = gapData.candles.slice(1);
+  feed.fetchCandles = async (symbol, interval) => {
+    fetched.push({ symbol, interval });
+    return histories.get(interval);
+  };
+  feed.bootstrapSymbolDelayMs = 0;
+  feed.stopped = false;
+  feed.hasConnected = true;
+
+  feed.handleSocketOpen();
+  while (feed.syncing) await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(fetched, [{ symbol: gapSymbol, interval: gapInterval }]);
+  assert.equal(feed.initialized, true);
+  assert.ok(SYMBOLS.every((symbol) => config.entryIntervals.every((interval) =>
+    feed.intervalData.get(interval).get(symbol).error === null)));
+  assert.ok(feedStates.some((event) =>
+    event.symbol === gapSymbol && event.interval === gapInterval && event.state.error === null));
+  feed.stop();
+});
+
 test('combined WebSocket partial-depth messages update the order book', () => {
   const books = [];
   const feedStates = [];

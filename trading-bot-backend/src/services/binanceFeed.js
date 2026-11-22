@@ -150,7 +150,9 @@ class BinanceFeed {
     this.bootstrapSymbolDelayMs = BOOTSTRAP_SYMBOL_DELAY_MS;
     this.stopped = true;
     this.initialized = false;
+    this.hasConnected = false;
     this.syncing = false;
+    this.bootstrapRequested = false;
     this.connected = false;
     this.data = new Map(SYMBOLS.map((symbol) => [symbol, {
       candles: [],
@@ -232,6 +234,8 @@ class BinanceFeed {
   async start() {
     if (!this.stopped) return;
     this.stopped = false;
+    this.hasConnected = false;
+    this.bootstrapRequested = false;
     this.connect();
     await this.bootstrapHistory();
   }
@@ -250,7 +254,13 @@ class BinanceFeed {
       for (let index = 0; index < bootstrapTasks.length; index += 1) {
         const { interval, symbol } = bootstrapTasks[index];
         const current = this.intervalData.get(interval).get(symbol);
-        if (this.getHistoryError(symbol, current.candles, interval) === null) continue;
+        if (this.getHistoryError(symbol, current.candles, interval) === null) {
+          if (current.error) {
+            current.error = null;
+            this.onFeedState(symbol, { error: null }, interval);
+          }
+          continue;
+        }
 
         let history;
         try {
@@ -308,6 +318,10 @@ class BinanceFeed {
       }
     } finally {
       this.syncing = false;
+      if (this.bootstrapRequested) {
+        this.bootstrapRequested = false;
+        this.requestBootstrap();
+      }
     }
   }
 
@@ -365,11 +379,7 @@ class BinanceFeed {
     if (this.stopped || this.socket) return;
     this.socket = new WebSocket(this.getStreamUrl(), { maxPayload: 1_048_576 });
 
-    this.socket.on('open', () => {
-      this.connected = true;
-      this.reconnectDelay = 1_000;
-      this.logger.info('Connected to Binance combined trade, kline, and depth streams');
-    });
+    this.socket.on('open', () => this.handleSocketOpen());
     this.socket.on('message', (buffer) => this.handleMessage(buffer));
     this.socket.on('error', (error) => this.logger.error('Binance WebSocket error', error));
     this.socket.on('close', () => {
@@ -387,6 +397,26 @@ class BinanceFeed {
       }
       if (!this.stopped) this.scheduleReconnect();
     });
+  }
+
+  handleSocketOpen() {
+    const reconnected = this.hasConnected;
+    this.hasConnected = true;
+    this.connected = true;
+    this.reconnectDelay = 1_000;
+    this.logger.info('Connected to Binance combined trade, kline, and depth streams');
+    if (reconnected) this.requestBootstrap();
+  }
+
+  requestBootstrap() {
+    if (this.stopped || this.restIpBanned) return;
+    if (this.syncing) {
+      this.bootstrapRequested = true;
+      return;
+    }
+    if (this.bootstrapTimer) return;
+    this.bootstrapHistory().catch((error) =>
+      this.logger.error('Binance candle bootstrap after reconnect failed', error));
   }
 
   handleMessage(buffer) {

@@ -101,4 +101,4 @@ The current backend stores one primary paper wallet and account-wide trades; it 
 
 ## Render deployment
 
-Create a Node web service rooted at `trading-bot-backend`, build command `npm install`, start command `npm start`, and set the environment variables above in Render. Use an always-on Render instance for continuous scanning; a sleeping instance cannot process candles. MongoDB data persists in Atlas. Binance public market-data outages reconnect automatically with exponential backoff; inspect service logs and `/api/health/ready` for failures.
+Create a Node web service rooted at `trading-bot-backend`, build command `npm install`, start command `npm start`, and set the environment variables above in Render. Use an always-on Render instance for continuous scanning; a sleeping instance cannot process candles. MongoDB data persists in Atlas. Binance public market-data outages reconnect automatically with exponential backoff and revalidate/repair candle history after reconnect; inspect service logs and `/api/health/ready` for failures.
